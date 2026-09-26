@@ -62,6 +62,7 @@ struct xc5000_priv {
 	unsigned int mode;
 	u8  rf_mode;
 	u8  radio_input;
+	u8 frequency_compensation;
 	u16  output_amp;
 
 	int chip_id;
@@ -89,6 +90,7 @@ struct xc5000_priv {
 /* Product id */
 #define XC_PRODUCT_ID_FW_NOT_LOADED	0x2000
 #define XC_PRODUCT_ID_FW_LOADED	0x1388
+#define XC_PRODUCT_ID_FW_LOADED_CTC701 0x1c84
 
 /* Registers */
 #define XREG_INIT         0x00
@@ -221,6 +223,7 @@ struct xc5000_fw_cfg {
 	u16 pll_reg;
 	u8 init_status_supported;
 	u8 fw_checksum_supported;
+	u8 frequency_compensation;
 };
 
 #define XC5000A_FIRMWARE "dvb-fe-xc5000-1.6.114.fw"
@@ -228,6 +231,7 @@ static const struct xc5000_fw_cfg xc5000a_1_6_114 = {
 	.name = XC5000A_FIRMWARE,
 	.size = 12401,
 	.pll_reg = 0x806c,
+	.frequency_compensation = 1,
 };
 
 #define XC5000C_FIRMWARE "dvb-fe-xc5000c-4.1.30.7.fw"
@@ -237,6 +241,27 @@ static const struct xc5000_fw_cfg xc5000c_41_024_5 = {
 	.pll_reg = 0x13,
 	.init_status_supported = 1,
 	.fw_checksum_supported = 1,
+	.frequency_compensation = 1,
+};
+
+#define XC5200_FIRMWARE "dvb-fe-xc5000c-6.1.16400.fw"
+static const struct xc5000_fw_cfg xc5200_6_1_16400 = {
+	.name = XC5200_FIRMWARE,
+	.size = 16503,
+	.pll_reg = 0x13,
+	.init_status_supported = 1,
+	.fw_checksum_supported = 1,
+	.frequency_compensation = 1,
+};
+
+#define CTC701_FIRMWARE "dvb-fe-ctc701-0.4.33.0-31875.fw"
+static const struct xc5000_fw_cfg ctc701_fw = {
+	.name = CTC701_FIRMWARE,
+	.size = 16503,
+/*	.pll_reg = 0x04, CTC703 only */
+	.init_status_supported = 1,
+	.fw_checksum_supported = 1,
+	.frequency_compensation = 0,
 };
 
 static inline const struct xc5000_fw_cfg *xc5000_assign_firmware(int chip_id)
@@ -247,6 +272,10 @@ static inline const struct xc5000_fw_cfg *xc5000_assign_firmware(int chip_id)
 		return &xc5000a_1_6_114;
 	case XC5000C:
 		return &xc5000c_41_024_5;
+	case XC5200:
+		return &xc5200_6_1_16400;
+	case CTC701:
+		return &ctc701_fw;
 	}
 }
 
@@ -614,6 +643,8 @@ static int xc_set_xtal(struct dvb_frontend *fe)
 		/* 32.000 MHz xtal is default */
 		break;
 	case XC5000C:
+	case XC5200:
+	case CTC701:
 		switch (priv->xtal_khz) {
 		default:
 		case 32000:
@@ -643,7 +674,7 @@ static int xc5000_fwupload(struct dvb_frontend *fe,
 	priv->pll_register_no = desired_fw->pll_reg;
 	priv->init_status_supported = desired_fw->init_status_supported;
 	priv->fw_checksum_supported = desired_fw->fw_checksum_supported;
-
+	priv->frequency_compensation = desired_fw->frequency_compensation;
 
 	dprintk(1, "firmware uploading...\n");
 	ret = xc_load_i2c_sequence(fe,  fw->data);
@@ -840,7 +871,7 @@ static int xc5000_set_digital_params(struct dvb_frontend *fe)
 		return -EINVAL;
 	}
 
-	priv->freq_hz = freq - priv->freq_offset;
+	priv->freq_hz = freq - priv->freq_offset * priv->frequency_compensation;
 	priv->mode = V4L2_TUNER_DIGITAL_TV;
 
 	dprintk(1, "%s() frequency=%d (compensated to %d)\n",
@@ -1092,7 +1123,7 @@ static int xc5000_get_frequency(struct dvb_frontend *fe, u32 *freq)
 {
 	struct xc5000_priv *priv = fe->tuner_priv;
 	dprintk(1, "%s()\n", __func__);
-	*freq = priv->freq_hz + priv->freq_offset;
+	*freq = priv->freq_hz + priv->freq_offset * priv->frequency_compensation;
 	return 0;
 }
 
@@ -1460,6 +1491,7 @@ struct dvb_frontend *xc5000_attach(struct dvb_frontend *fe,
 
 	switch (id) {
 	case XC_PRODUCT_ID_FW_LOADED:
+	case XC_PRODUCT_ID_FW_LOADED_CTC701:
 		printk(KERN_INFO
 			"xc5000: Successfully identified at address 0x%02x\n",
 			cfg->i2c_address);
@@ -1499,3 +1531,5 @@ MODULE_DESCRIPTION("Xceive xc5000 silicon tuner driver");
 MODULE_LICENSE("GPL");
 MODULE_FIRMWARE(XC5000A_FIRMWARE);
 MODULE_FIRMWARE(XC5000C_FIRMWARE);
+MODULE_FIRMWARE(XC5200_FIRMWARE);
+MODULE_FIRMWARE(CTC701_FIRMWARE);

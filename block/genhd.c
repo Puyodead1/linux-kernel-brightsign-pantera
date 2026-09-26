@@ -21,6 +21,7 @@
 #include <linux/log2.h>
 #include <linux/pm_runtime.h>
 #include <linux/badblocks.h>
+#include <linux/circ_buf.h>
 
 #include "blk.h"
 
@@ -631,10 +632,30 @@ void device_add_disk(struct device *parent, struct gendisk *disk)
 				   "bdi");
 	WARN_ON(retval);
 
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+	if (disk->errors) {
+		struct kernfs_node *parent_sd = (&disk_to_dev(disk)->kobj)->sd;
+		disk->errors->notify = sysfs_get_dirent(parent_sd, "error_report");
+	}
+#endif
+
 	disk_add_events(disk);
 	blk_integrity_add(disk);
 }
 EXPORT_SYMBOL(device_add_disk);
+
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+static void gendisk_destroy_error_reports(struct gendisk_error_reports* reports)
+{
+        if (reports) {
+		if (reports->notify)
+			sysfs_put(reports->notify);
+                mutex_destroy(&reports->readlock);
+                mutex_destroy(&reports->writelock);
+                kfree(reports);
+        }
+}
+#endif
 
 void del_gendisk(struct gendisk *disk)
 {
@@ -669,6 +690,10 @@ void del_gendisk(struct gendisk *disk)
 	if (!sysfs_deprecated)
 		sysfs_remove_link(block_depr, dev_name(disk_to_dev(disk)));
 	pm_runtime_set_memalloc_noio(disk_to_dev(disk), false);
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+        gendisk_destroy_error_reports(disk->errors);
+        disk->errors = NULL;
+#endif
 	device_del(disk_to_dev(disk));
 }
 EXPORT_SYMBOL(del_gendisk);
@@ -1005,6 +1030,71 @@ static ssize_t disk_discard_alignment_show(struct device *dev,
 	return sprintf(buf, "%d\n", queue_discard_alignment(disk->queue));
 }
 
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+static ssize_t error_report_show(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	ssize_t len = 0;
+
+	if (disk && disk->errors) {
+		int count;
+
+		mutex_lock(&disk->errors->readlock);
+	
+		count = CIRC_CNT(disk->errors->head, disk->errors->tail, 
+					GENDISK_ERROR_REPORT_BUFSIZE);
+		if (count) {
+			struct gendisk_error* report = 
+					&disk->errors->reports[disk->errors->tail];
+	
+			len = sprintf(buf, "%lu.%06lu %u %llu %d\n", 
+					report->ktv.tv_sec, report->ktv.tv_usec,
+					report->source, report->param, report->error);
+
+			smp_mb();	/* processing complete, can move on */
+			disk->errors->tail = (disk->errors->tail + 1) 
+						& (GENDISK_ERROR_REPORT_BUFSIZE - 1);
+		}
+
+		/* Is there any more data in the buffer?*/
+		count = CIRC_CNT(disk->errors->head, disk->errors->tail, 
+					GENDISK_ERROR_REPORT_BUFSIZE);
+		mutex_unlock(&disk->errors->readlock);
+
+		if (count && disk->errors->notify)
+			sysfs_notify_dirent(disk->errors->notify);
+	}
+
+	return len;
+}
+
+static ssize_t error_stats_show(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	return sprintf(buf, "%d\n", disk->errors ? disk->errors->total : 0);
+}
+
+ssize_t error_inject_store(struct device *dev, struct device_attribute *attr,
+                           const char *buf, size_t count)
+{
+        struct gendisk *disk = dev_to_disk(dev);
+        int val;
+
+        if (count) {
+                char *p = (char *) buf;
+                val = simple_strtoul(p, &p, 10);
+
+		genhd_report_error(disk, GENDISK_ERROR_REPORT_SOURCE_BLOCK, val, -EIO);
+        }
+
+        return count;
+}
+#endif
+
 static DEVICE_ATTR(range, S_IRUGO, disk_range_show, NULL);
 static DEVICE_ATTR(ext_range, S_IRUGO, disk_ext_range_show, NULL);
 static DEVICE_ATTR(removable, S_IRUGO, disk_removable_show, NULL);
@@ -1018,6 +1108,11 @@ static DEVICE_ATTR(stat, S_IRUGO, part_stat_show, NULL);
 static DEVICE_ATTR(inflight, S_IRUGO, part_inflight_show, NULL);
 static DEVICE_ATTR(badblocks, S_IRUGO | S_IWUSR, disk_badblocks_show,
 		disk_badblocks_store);
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+static DEVICE_ATTR(error_report, S_IRUGO, error_report_show, NULL);
+static DEVICE_ATTR(error_stats, S_IRUGO, error_stats_show, NULL);
+static DEVICE_ATTR(error_inject, S_IWUSR, NULL, error_inject_store);
+#endif
 #ifdef CONFIG_FAIL_MAKE_REQUEST
 static struct device_attribute dev_attr_fail =
 	__ATTR(make-it-fail, S_IRUGO|S_IWUSR, part_fail_show, part_fail_store);
@@ -1040,6 +1135,11 @@ static struct attribute *disk_attrs[] = {
 	&dev_attr_stat.attr,
 	&dev_attr_inflight.attr,
 	&dev_attr_badblocks.attr,
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+	&dev_attr_error_report.attr,
+	&dev_attr_error_stats.attr,
+	&dev_attr_error_inject.attr,
+#endif
 #ifdef CONFIG_FAIL_MAKE_REQUEST
 	&dev_attr_fail.attr,
 #endif
@@ -1246,6 +1346,51 @@ static int __init proc_genhd_init(void)
 module_init(proc_genhd_init);
 #endif /* CONFIG_PROC_FS */
 
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+void genhd_report_error(struct gendisk *disk, int source, unsigned long long param, int error)
+{
+        if (disk && disk->errors) {
+		unsigned long head;
+		unsigned long tail;
+
+		mutex_lock(&disk->errors->writelock);
+                disk->errors->total++;
+
+       		head = disk->errors->head;
+       		tail = ACCESS_ONCE(disk->errors->tail);
+
+       		if (CIRC_SPACE(head, tail, GENDISK_ERROR_REPORT_BUFSIZE) >= 1) {
+			struct gendisk_error* report = &disk->errors->reports[head];
+			do_gettimeofday(&report->ktv);
+
+			/* Leave the last position for over-run reporting */
+       			if (CIRC_SPACE(head, tail, GENDISK_ERROR_REPORT_BUFSIZE) >= 2) {
+				report->error = error;
+				report->source = source;
+				report->param = param;
+			} else {
+				/* Almost out of space, report overflow in last position */
+				report->error = -EOVERFLOW;
+				report->source = GENDISK_ERROR_REPORT_SOURCE_INTERNAL;
+				report->param = 0ULL;
+			}
+
+               		smp_wmb(); /* commit the item before incrementing the head index */
+               		disk->errors->head = (disk->errors->head + 1) 
+						& (GENDISK_ERROR_REPORT_BUFSIZE - 1);
+		}
+               
+		mutex_unlock(&disk->errors->writelock);
+
+		if (disk->errors->notify)
+			sysfs_notify_dirent(disk->errors->notify);
+        } 
+}
+#else
+void genhd_report_error(struct gendisk *disk, int source, unsigned long long param, int error) {}
+#endif
+EXPORT_SYMBOL_GPL(genhd_report_error);
+
 dev_t blk_lookup_devt(const char *name, int partno)
 {
 	dev_t devt = MKDEV(0, 0);
@@ -1287,6 +1432,26 @@ struct gendisk *alloc_disk(int minors)
 }
 EXPORT_SYMBOL(alloc_disk);
 
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+static struct gendisk_error_reports* alloc_error_reports(int node_id)
+{
+	struct gendisk_error_reports* reports = kmalloc_node(
+		sizeof(struct gendisk_error_reports), GFP_KERNEL, node_id);
+
+	if (!reports)
+		return NULL;
+	
+	reports->head = 0;
+	reports->tail = 0;
+	reports->total = 0;
+	reports->notify = NULL;
+	mutex_init(&reports->readlock);
+	mutex_init(&reports->writelock);
+
+	return reports;
+}
+#endif
+
 struct gendisk *alloc_disk_node(int minors, int node_id)
 {
 	struct gendisk *disk;
@@ -1326,6 +1491,9 @@ struct gendisk *alloc_disk_node(int minors, int node_id)
 		disk_to_dev(disk)->class = &block_class;
 		disk_to_dev(disk)->type = &disk_type;
 		device_initialize(disk_to_dev(disk));
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+		disk->errors = alloc_error_reports(node_id);
+#endif
 	}
 	return disk;
 }

@@ -295,8 +295,7 @@ config DB8500_CPUFREQ_COOLING
 config INTEL_POWERCLAMP
 	tristate "Intel PowerClamp idle injection driver"
 	depends on THERMAL
-	depends on X86
-	depends on CPU_SUP_INTEL
+	depends on (X86 && CPU_SUP_INTEL) || ARM || ARM64
 	help
 	  Enable this to enable Intel PowerClamp idle injection driver. This
 	  enforce idle time which results in more package C-state residency. The
@@ -380,6 +379,10 @@ config MTK_THERMAL
 	help
 	  Enable this option if you want to have support for thermal management
 	  controller present in Mediatek SoCs
+
+config BRCMSTB_THERMAL
+	tristate "Broadcom STB AVS TMON thermal driver"
+	depends on ARCH_BRCMSTB
 
 menu "Texas Instruments thermal drivers"
 depends on ARCH_HAS_BANDGAP || COMPILE_TEST

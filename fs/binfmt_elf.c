@@ -28,17 +28,21 @@
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
+#include <linux/radix-tree.h>
 #include <linux/security.h>
 #include <linux/random.h>
 #include <linux/elf.h>
 #include <linux/elf-randomize.h>
 #include <linux/utsname.h>
 #include <linux/coredump.h>
+#include <linux/brightsign/watchdog.h>
 #include <linux/sched.h>
 #include <linux/dax.h>
 #include <asm/uaccess.h>
 #include <asm/param.h>
 #include <asm/page.h>
+#include <asm/cacheflush.h>
+#include "coredump.h"
 
 #ifndef user_long_t
 #define user_long_t long
@@ -1241,6 +1245,32 @@ out:
  * Jeremy Fitzhardinge <jeremy@sw.oz.au>
  */
 
+extern int little_core_dump;
+extern int ltcore_dump_cnt;
+extern char ltcore_dump_file[CONFIG_LTCORE_MAX_PAGES*PAGE_SIZE];
+
+#define CORE_DUMPED_SIGNATURE 0xc0227e5c
+#define CORE_DUMP_IN_PROGRESS (~CORE_DUMPED_SIGNATURE)
+unsigned int core_dumped __attribute__ ((section (".bss_noinit")));
+
+ssize_t read_ltcore(struct file *file, char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	if (*ppos >= ltcore_dump_cnt) {
+		if (ltcore_dump_cnt > 0) {
+			core_dumped = 0;
+			ltcore_dump_cnt = 0;
+		}
+		return 0;
+	}
+	if (count + *ppos > ltcore_dump_cnt)
+		count = ltcore_dump_cnt - *ppos;
+	if (copy_to_user(buf, ltcore_dump_file + *ppos, count))
+		return -EFAULT;
+	*ppos += count;
+	return count;
+}
+
 /*
  * The purpose of always_dump_vma() is to make sure that special kernel mappings
  * that are useful for post-mortem analysis are included in every core dump.
@@ -1495,7 +1525,7 @@ static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
 	len = mm->arg_end - mm->arg_start;
 	if (len >= ELF_PRARGSZ)
 		len = ELF_PRARGSZ-1;
-	if (copy_from_user(&psinfo->pr_psargs,
+	if (__copy_from_user(&psinfo->pr_psargs,
 		           (const char __user *)mm->arg_start, len))
 		return -EFAULT;
 	for(i = 0; i < len; i++)
@@ -1918,7 +1948,7 @@ static int elf_dump_thread_status(long signr, struct elf_thread_status *t)
 
 	fill_prstatus(&t->prstatus, p, signr);
 	elf_core_copy_task_regs(p, &t->prstatus.pr_reg);	
-	
+
 	fill_note(&t->notes[0], "CORE", NT_PRSTATUS, sizeof(t->prstatus),
 		  &(t->prstatus));
 	t->num_notes++;
@@ -1967,7 +1997,7 @@ static int elf_note_info_init(struct elf_note_info *info)
 	info->notes = kmalloc(8 * sizeof(struct memelfnote), GFP_KERNEL);
 	if (!info->notes)
 		return 0;
-	info->psinfo = kmalloc(sizeof(*info->psinfo), GFP_KERNEL);
+	info->psinfo = kmalloc(sizeof(*info->psinfo), GFP_ATOMIC);
 	if (!info->psinfo)
 		return 0;
 	info->prstatus = kmalloc(sizeof(*info->prstatus), GFP_KERNEL);
@@ -1977,7 +2007,7 @@ static int elf_note_info_init(struct elf_note_info *info)
 	if (!info->fpu)
 		return 0;
 #ifdef ELF_CORE_COPY_XFPREGS
-	info->xfpu = kmalloc(sizeof(*info->xfpu), GFP_KERNEL);
+	info->xfpu = kmalloc(sizeof(*info->xfpu), GFP_ATOMIC);
 	if (!info->xfpu)
 		return 0;
 #endif
@@ -1995,14 +2025,18 @@ static int fill_note_info(struct elfhdr *elf, int phdrs,
 	if (!elf_note_info_init(info))
 		return 0;
 
+	ltcore_add_rdebug();
+	ltcore_add_stack(KSTK_ESP(current));
+	
 	for (ct = current->mm->core_state->dumper.next;
 					ct; ct = ct->next) {
-		ets = kzalloc(sizeof(*ets), GFP_KERNEL);
+		ets = kzalloc(sizeof(*ets), GFP_ATOMIC);
 		if (!ets)
 			return 0;
 
 		ets->thread = ct->task;
 		list_add(&ets->list, &info->thread_list);
+		ltcore_add_stack(KSTK_ESP(ct->task));
 	}
 
 	list_for_each(t, &info->thread_list) {
@@ -2115,6 +2149,254 @@ static void free_note_info(struct elf_note_info *info)
 
 #endif
 
+RADIX_TREE(ltcore_bitset, GFP_ATOMIC);
+
+/* Each element in the tree has a page worth of bits associated with
+ * it which means that it can handle 32K worth of pages. The
+ * assumption is that most of the pages we'll end up dumping will be
+ * adjacent so we'll only end up allocating a few pages.
+ */
+#define RADIX_BYTES_PER_ELEMENT (PAGE_SIZE)
+#define RADIX_KEY(x) ((x) & ~(RADIX_BYTES_PER_ELEMENT-1))
+#define RADIX_BITSET_OFFSET(x) (((x) & (RADIX_BYTES_PER_ELEMENT-1)) >> 3)
+#define RADIX_BITSET_MASK(x) (1 << ((x) & 7))
+
+static u8 *ltcore_bitset_lookup_or_create(unsigned long pg)
+{
+	u8 *bitset = radix_tree_lookup(&ltcore_bitset, RADIX_KEY(pg));
+	if (!bitset) {
+		bitset = (u8 *)get_zeroed_page(GFP_ATOMIC);
+		if (bitset) {
+			int rc = radix_tree_insert(&ltcore_bitset, RADIX_KEY(pg), bitset);
+			if (rc) {
+				pr_err("ltcore_bitset radix insert failure: %d\n", rc);
+				kfree(bitset);
+				bitset = NULL;
+			}
+		}
+		else
+			pr_err("ltcore_bitset memory allocation failure\n");
+	}
+	return bitset;
+}
+
+static int ltcore_set_alloc(void)
+{
+	return 1;
+}
+
+static void ltcore_add_page(unsigned long pg)
+{
+	BUG_ON(RADIX_BITSET_OFFSET(pg) > PAGE_SIZE);
+	BUG_ON(RADIX_BITSET_MASK(pg) > 0xff);
+
+	u8 *bitset = ltcore_bitset_lookup_or_create(pg);
+	if (bitset) {
+		bitset[RADIX_BITSET_OFFSET(pg)] |= RADIX_BITSET_MASK(pg);
+	}
+}
+
+static int ltcore_has_page(unsigned long pg)
+{
+	u8 *bitset = radix_tree_lookup(&ltcore_bitset, RADIX_KEY(pg));
+	if (bitset)
+		return bitset[RADIX_BITSET_OFFSET(pg)] & RADIX_BITSET_MASK(pg);
+	else
+		return 0;
+}
+
+static void ltcore_add_range(unsigned long start, unsigned long end)
+{
+	unsigned long s = start >> PAGE_SHIFT;
+	unsigned long e = end >> PAGE_SHIFT;
+	unsigned long i;
+
+	if (end & (PAGE_SIZE-1)) ++e;
+	for (i = s; i < e; i++) ltcore_add_page(i);
+}
+
+static void ltcore_trim(unsigned long* vm_start, unsigned long* vm_end)
+{
+	unsigned long i;
+	if (!little_core_dump) return;
+	while (*vm_start < *vm_end && !ltcore_has_page(*vm_start >> PAGE_SHIFT))
+		*vm_start += PAGE_SIZE;
+	for (i = *vm_start; i < *vm_end; i += PAGE_SIZE)
+		if (!ltcore_has_page(i >> PAGE_SHIFT)) {
+			*vm_end = i & ~(PAGE_SIZE-1);
+			break;
+		}
+}
+
+static void ltcore_add_stack(unsigned long sp)
+{
+	struct vm_area_struct *vma;
+	if (!little_core_dump) return;
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+		if (vma->vm_start <= sp && sp < vma->vm_end && (vma->vm_flags & VM_READ)) {
+			unsigned long end = vma->vm_end;
+			if (end - sp > 0x10000) end = sp + 0x10000;
+			ltcore_add_range(sp, end);
+			/* Only one VMA can contain the stack so, if we found it, we're done. */
+			return;
+		}
+	}
+
+	/* We didn't find any VMA enclosing $sp.  This can happen if the thread being
+	   dumped has crashed due to overrunning its allocated area, in which case $sp will
+	   point to somewhere below the valid region.  Find the VMA which starts at the next
+	   closest address and add that one instead.  */
+	struct vm_area_struct *best_vma = NULL;
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+		if (vma->vm_start >= sp && (vma->vm_flags & VM_READ)) {
+			if (best_vma == NULL
+			    || vma->vm_start < best_vma->vm_start)
+				best_vma = vma;
+		}
+	}
+
+	if (best_vma) {
+		unsigned long end = best_vma->vm_end;
+		if (end - best_vma->vm_start > 0x10000) end = best_vma->vm_start + 0x10000;
+		ltcore_add_range (best_vma->vm_start, end);
+	}
+}
+
+static elf_addr_t auxv_lookup_addr(unsigned long id)
+{
+	elf_addr_t *elf_info = (elf_addr_t *)current->mm->saved_auxv;
+	while (*elf_info != 0) {
+		if (*elf_info == id)
+			return *++elf_info;
+		elf_info += 2;
+	}
+
+	return 0;
+}
+
+static unsigned long auxv_lookup_size(unsigned long id)
+{
+	return (unsigned long)auxv_lookup_addr(id);
+}
+
+/* We must add the dynamic segment to the core dump so that GDB can
+ * look up DT_DEBUG in it. */
+static void ltcore_add_rdebug(void)
+{
+	unsigned long seg;
+	elf_addr_t phoff = auxv_lookup_addr(AT_PHDR);
+	unsigned long phent = auxv_lookup_size(AT_PHENT);
+	unsigned long phnum = auxv_lookup_size(AT_PHNUM);
+
+	BUG_ON(in_atomic());
+	elf_addr_t load_bias = 0;
+
+	for(seg = 0; seg < phnum; ++seg) {
+		struct elf_phdr hdr;
+		if (__copy_from_user(&hdr, (const char __user *)(phoff + seg * phent), sizeof(hdr))) {
+			pr_err("%s: Failed to read program header index %lu\n", __func__, seg);
+			return;
+		}
+
+		if (hdr.p_type == PT_PHDR) {
+			// If this exists, it will be the first phdr.  So we don't need to
+			// worry about searching for this before we start looking for
+			// PT_DYNAMIC.
+			load_bias = phoff - hdr.p_vaddr;
+		}
+
+		if (hdr.p_type == PT_DYNAMIC) {
+			unsigned long r_debug = 0;
+			Elf_Dyn *dyn;
+
+			/* We don't want to risk a huge kalloc. */
+			if (hdr.p_memsz >= 131072) {
+				pr_err("%s: Dynamic segment too large: %lu\n",
+				       __func__, (unsigned long)hdr.p_memsz);
+				return;
+			}
+
+			/* Add the dynamic segment to the core dump so the linker can find r_debug */
+			ltcore_add_range(hdr.p_vaddr + load_bias, hdr.p_vaddr + load_bias + hdr.p_memsz);
+
+			/* Now we need to scan the structure ourselves
+			 * in order to find r_debug and put it in the
+			 * core dump.
+			 */
+			dyn = kmalloc(hdr.p_memsz, GFP_KERNEL);
+			if (!dyn) {
+				pr_err("%s: Memory allocation failure\n", __func__);
+				return;
+			}
+
+			if (__copy_from_user(dyn, (const char __user *)hdr.p_vaddr + load_bias, hdr.p_memsz)) {
+				pr_err("%s: Failed to read dynamic section\n", __func__);
+				kfree(dyn);
+				return;
+			}
+			unsigned int i;
+			const unsigned int count = hdr.p_memsz/sizeof(Elf_Dyn);
+
+			for (i = 0; dyn[i].d_tag != DT_NULL && i < count; ++i) {
+				if (dyn[i].d_tag == DT_DEBUG) {
+					pr_debug("%s: found r_debug at 0x%lx\n",
+						 __func__, (unsigned long)dyn[i].d_un.d_ptr);
+					r_debug = dyn[i].d_un.d_ptr;
+					break;
+				}
+			}
+			kfree(dyn);
+
+			if (r_debug) {
+				unsigned long r_map;
+				unsigned long l_next;
+				unsigned long l_name;
+
+				ltcore_add_range(r_debug, r_debug + 1024); /* 744 is the current size */
+				if (__copy_from_user(&r_map, (const char __user *)(r_debug+sizeof(unsigned long)),sizeof(unsigned long))) {
+					pr_err("%s: failed to read r_map\n", __func__);
+					return;
+				}
+				while (1) {
+					if (r_map) ltcore_add_range(r_map, r_map + 1024);
+					if (__copy_from_user(&l_next, (const char __user *)(r_map+sizeof(unsigned long)*3), sizeof(unsigned long)))
+						return;
+					if (__copy_from_user(&l_name, (const char __user *)(r_map+sizeof(unsigned long)), sizeof(unsigned long)))
+						return;
+					if (l_name) ltcore_add_range(l_name, l_name + 256);
+					r_map = l_next;
+				}
+			}
+		}
+	}
+}
+
+int ltcore_get_seg_count(void)
+{
+	struct vm_area_struct *vma;
+	int cnt = 0;
+	unsigned long mm_flags = current->mm->flags;
+
+	if (!little_core_dump) return current->mm->map_count;
+
+	for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
+		unsigned long vm_start = vma->vm_start;
+		unsigned long end = vma->vm_start + vma_dump_size(vma, mm_flags);
+		unsigned long vm_end = end;
+
+	phdr_again:
+		ltcore_trim(&vm_start, &vm_end);
+		if (vm_start >= vm_end) continue;
+
+		++cnt;
+		if (vm_end == end) continue;
+		vm_start = vm_end;
+		vm_end = end;
+		goto phdr_again;
+	}
+	return cnt;
+}
+
 static struct vm_area_struct *first_vma(struct task_struct *tsk,
 					struct vm_area_struct *gate_vma)
 {
@@ -2157,6 +2439,34 @@ static void fill_extnum_info(struct elfhdr *elf, struct elf_shdr *shdr4extnum,
 	shdr4extnum->sh_info = segs;
 }
 
+#if defined(__arm__)
+static int get_register(const struct pt_regs *regs, unsigned int index, unsigned long *value)
+{
+	if (index < 16) {
+		*value = regs->uregs[index];
+		return 1;
+	} else
+		return 0;
+}
+#elif defined(__aarch64__)
+static int get_register(const struct pt_regs *regs, unsigned int index, unsigned long *value)
+{
+	if (index < 31) {
+		*value = regs->regs[index];
+		return 1;
+	} else if (index == 32) {
+		*value = regs->sp;
+		return 1;
+	} else if (index == 33) {
+		*value = regs->pc;
+		return 1;
+	} else
+		return 0;
+}
+#else
+#error Unknown get_register implementation
+#endif // __arm__
+
 /*
  * Actual dumper
  *
@@ -2193,18 +2503,48 @@ static int elf_core_dump(struct coredump_params *cprm)
 	 */
   
 	/* alloc memory for large data structures: too large to be on stack */
-	elf = kmalloc(sizeof(*elf), GFP_KERNEL);
+	elf = kmalloc(sizeof(*elf), GFP_ATOMIC);
 	if (!elf)
 		goto out;
+
+	if (little_core_dump && !ltcore_set_alloc())
+		goto out;
+
+
+	/*  Add memory regions we're interested in before we cound the number of segs */
+	if (cprm->siginfo->si_signo) 
+	{
+		struct core_thread *ct;
+
+		ltcore_add_rdebug();
+		ltcore_add_stack(KSTK_ESP(current));
+		BUG_ON(!current->mm->core_state);
+
+		for (ct = current->mm->core_state->dumper.next;
+						ct; ct = ct->next) {
+			ltcore_add_stack(KSTK_ESP(ct->task));
+		}
+		struct pt_regs *regs = task_pt_regs(current);
+		mm_segment_t old_fs = get_fs();
+		set_fs(USER_DS);
+		unsigned long v;
+		unsigned int index = 0;
+		while (get_register(regs, index++, &v)) {
+			if (access_ok (VERIFY_READ, v, 4))
+				ltcore_add_range (v & ~(PAGE_SIZE - 1), (v & ~(PAGE_SIZE - 1)) + PAGE_SIZE);
+		}
+		set_fs(old_fs);
+	}
+
 	/*
 	 * The number of segs are recored into ELF header as 16bit value.
 	 * Please check DEFAULT_MAX_MAP_COUNT definition when you modify here.
 	 */
-	segs = current->mm->map_count;
+	segs = ltcore_get_seg_count();
 	segs += elf_core_extra_phdrs();
 
 	gate_vma = get_gate_vma(current->mm);
-	if (gate_vma != NULL)
+	if (!little_core_dump && (gate_vma != NULL))
 		segs++;
 
 	/* for notes section */
@@ -2236,7 +2576,7 @@ static int elf_core_dump(struct coredump_params *cprm)
 
 		sz += elf_coredump_extra_notes_size();
 
-		phdr4note = kmalloc(sizeof(*phdr4note), GFP_KERNEL);
+		phdr4note = kmalloc(sizeof(*phdr4note), GFP_ATOMIC);
 		if (!phdr4note)
 			goto end_coredump;
 
@@ -2246,7 +2586,13 @@ static int elf_core_dump(struct coredump_params *cprm)
 
 	dataoff = offset = roundup(offset, ELF_EXEC_PAGESIZE);
 
-	vma_filesz = kmalloc_array(segs - 1, sizeof(*vma_filesz), GFP_KERNEL);
+	/* Upstream uses segs-1 for the size here. We can't because
+	 * ltcore_get_seg_count() has decoupled the number of segments
+	 * we'll emit from the number of VMAs. So, let's just use the
+	 * value that upstream used to calculate segs instead (and we
+	 * no longer need to take one off for the notes.)
+	 */
+	vma_filesz = kmalloc_array(current->mm->map_count, sizeof(*vma_filesz), GFP_KERNEL);
 	if (!vma_filesz)
 		goto end_coredump;
 
@@ -2264,7 +2610,7 @@ static int elf_core_dump(struct coredump_params *cprm)
 	e_shoff = offset;
 
 	if (e_phnum == PN_XNUM) {
-		shdr4extnum = kmalloc(sizeof(*shdr4extnum), GFP_KERNEL);
+		shdr4extnum = kmalloc(sizeof(*shdr4extnum), GFP_ATOMIC);
 		if (!shdr4extnum)
 			goto end_coredump;
 		fill_extnum_info(elf, shdr4extnum, e_shoff, segs);
@@ -2282,13 +2628,23 @@ static int elf_core_dump(struct coredump_params *cprm)
 	for (i = 0, vma = first_vma(current, gate_vma); vma != NULL;
 			vma = next_vma(vma, gate_vma)) {
 		struct elf_phdr phdr;
+		unsigned long vm_start = vma->vm_start;
+		unsigned long end = vma->vm_start + vma_filesz[i++];
+		unsigned long vm_end = end;
+		unsigned long sz;
 
+	phdr_again:
+		ltcore_trim(&vm_start, &vm_end);
+		if (little_core_dump && vm_start >= vm_end) continue;
+
+		sz = vm_end - vm_start;
+		
 		phdr.p_type = PT_LOAD;
 		phdr.p_offset = offset;
-		phdr.p_vaddr = vma->vm_start;
+		phdr.p_vaddr = vm_start;
 		phdr.p_paddr = 0;
-		phdr.p_filesz = vma_filesz[i++];
-		phdr.p_memsz = vma->vm_end - vma->vm_start;
+		phdr.p_filesz = sz;
+		phdr.p_memsz = little_core_dump ? sz : (vma->vm_end - vma->vm_start);
 		offset += phdr.p_filesz;
 		phdr.p_flags = vma->vm_flags & VM_READ ? PF_R : 0;
 		if (vma->vm_flags & VM_WRITE)
@@ -2299,6 +2655,11 @@ static int elf_core_dump(struct coredump_params *cprm)
 
 		if (!dump_emit(cprm, &phdr, sizeof(phdr)))
 			goto end_coredump;
+
+		if (vm_end == end) continue;
+		vm_start = vm_end;
+		vm_end = end;
+		goto phdr_again;
 	}
 
 	if (!elf_core_write_extra_phdrs(cprm, offset))
@@ -2318,25 +2679,42 @@ static int elf_core_dump(struct coredump_params *cprm)
 	for (i = 0, vma = first_vma(current, gate_vma); vma != NULL;
 			vma = next_vma(vma, gate_vma)) {
 		unsigned long addr;
-		unsigned long end;
+		unsigned long vm_start = vma->vm_start;
+		unsigned long end = vma->vm_start + vma_filesz[i++];
+		unsigned long vm_end = end;
 
-		end = vma->vm_start + vma_filesz[i++];
+	vma_again:
+ 		ltcore_trim(&vm_start, &vm_end);
+		if (vm_start >= vm_end) continue;
 
-		for (addr = vma->vm_start; addr < end; addr += PAGE_SIZE) {
+		for (addr = vm_start; addr < vm_end; addr += PAGE_SIZE) {
 			struct page *page;
 			int stop;
 
-			page = get_dump_page(addr);
-			if (page) {
-				void *kaddr = kmap(page);
-				stop = !dump_emit(cprm, kaddr, PAGE_SIZE);
-				kunmap(page);
-				put_page(page);
-			} else
-				stop = !dump_skip(cprm, PAGE_SIZE);
-			if (stop)
-				goto end_coredump;
+			if (little_core_dump) {
+				static unsigned char buf[PAGE_SIZE];
+
+				if (__copy_from_user(buf, (const char __user *)addr, PAGE_SIZE))
+					memset(buf,0xbe,PAGE_SIZE);
+				if (!dump_emit(cprm, buf, PAGE_SIZE))
+					goto end_coredump;
+			} else {
+				page = get_dump_page(addr);
+				if (page) {
+					void *kaddr = kmap(page);
+					stop = !dump_emit(cprm, kaddr, PAGE_SIZE);
+					kunmap(page);
+					put_page(page);
+				} else
+					stop = !dump_skip(cprm, PAGE_SIZE);
+				if (stop)
+					goto end_coredump;
+			}
 		}
+		if (vm_end == end) continue;
+		vm_start = vm_end;
+		vm_end = end;
+		goto vma_again;
 	}
 	dump_truncate(cprm);
 
@@ -2361,10 +2739,54 @@ out:
 	return has_dumped;
 }
 
+void ltcore_dump(struct siginfo *siginfo, struct pt_regs *regs)
+{
+	struct core_state core_state;
+	struct coredump_params cprms;
+
+	preempt_disable();
+	if (core_dumped == CORE_DUMPED_SIGNATURE || core_dumped == CORE_DUMP_IN_PROGRESS) {
+		printk ("Already dumped core so not dumping again.\n");
+		preempt_enable();
+		return;
+	}
+	core_dumped = CORE_DUMP_IN_PROGRESS;
+	preempt_enable();
+
+	printk ("Starting core dump\n");
+
+	/* Give ourselves a minute to generate the crash dump. */
+	bs_watchdog_postpone(60);
+
+	if (coredump_wait (128+siginfo->si_signo, &core_state) < 0)
+		BUG();
+
+	little_core_dump = 1;
+	memset (&cprms, 0, sizeof (cprms));
+	cprms.siginfo = siginfo;
+	cprms.regs = regs;
+	cprms.limit = CONFIG_LTCORE_MAX_PAGES * PAGE_SIZE;
+	cprms.mm_flags = current->mm->flags;
+	elf_core_dump(&cprms);
+	little_core_dump = 0;
+	force_writeback(&ltcore_dump_file, sizeof(ltcore_dump_file));
+	force_writeback(&ltcore_dump_cnt, sizeof(ltcore_dump_cnt));
+	core_dumped = CORE_DUMPED_SIGNATURE;
+	force_writeback(&core_dumped, sizeof(core_dumped));
+	printk("core_dumped\n");
+	coredump_finish(current->mm, true);
+}
+
 #endif		/* CONFIG_ELF_CORE */
 
 static int __init init_elf_binfmt(void)
 {
+#if defined(CONFIG_ELF_CORE)
+	if (core_dumped != CORE_DUMPED_SIGNATURE) {
+		core_dumped = 0;
+		ltcore_dump_cnt = 0;
+	}
+#endif
 	register_binfmt(&elf_format);
 	return 0;
 }

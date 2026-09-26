@@ -1815,6 +1815,13 @@ static const struct usb_device_id acm_ids[] = {
 	.driver_info = IGNORE_DEVICE,
 	},
 
+	/* NEXIO NEX170 touchscreen needs to be handled by usbtouchscreen,
+	 * not this driver.  Bug#23685.
+	 */
+	{ USB_DEVICE(0x1870, 0x0001),
+	.driver_info = IGNORE_DEVICE,
+	},
+
 	/* control interfaces without any protocol set */
 	{ USB_INTERFACE_INFO(USB_CLASS_COMM, USB_CDC_SUBCLASS_ACM,
 		USB_CDC_PROTO_NONE) },

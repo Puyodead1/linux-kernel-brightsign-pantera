@@ -37,6 +37,10 @@ extern struct processor {
 	 */
 	void (*_proc_init)(void);
 	/*
+	 * Check for processor bugs
+	 */
+	void (*check_bugs)(void);
+	/*
 	 * Disable any processor specifics
 	 */
 	void (*_proc_fin)(void);
@@ -76,6 +80,8 @@ extern struct processor {
 	void (*do_suspend)(void *);
 	void (*do_resume)(void *);
 } processor;
+
+extern int impala_revc_do_idle(void);
 
 #ifndef MULTI_CPU
 extern void cpu_proc_init(void);

@@ -25,15 +25,25 @@
 #include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio_keys.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/of_gpio.h>
 #include <linux/property.h>
+#include <linux/reboot.h>
+#include <linux/sched.h>
 
 #define DRV_NAME	"gpio-keys-polled"
+
+static bool reset_force_crash;
 
 struct gpio_keys_button_data {
 	int last_state;
 	int count;
 	int threshold;
 	int can_sleep;
+	bool is_input;
+	bool is_polled;
+	bool is_claimed;
 };
 
 struct gpio_keys_polled_dev {
@@ -44,6 +54,21 @@ struct gpio_keys_polled_dev {
 	unsigned long abs_axis_seen[BITS_TO_LONGS(ABS_CNT)];
 	struct gpio_keys_button_data data[0];
 };
+
+/* Send SIGABRT to the brightsign process if it is running so we get a crash dump */
+static void abort_brightsign(void)
+{
+	struct task_struct *p;
+	for_each_process(p) {
+		if (!strcmp(p->comm,"brightsign")) {
+			pr_info("Sending SIGABRT to %s to generate core dump\n", p->comm);
+			force_sig(SIGABRT, p);
+			return;
+		}
+	}
+
+	panic("Failed to find brightsign process to kill\n");
+}
 
 static void gpio_keys_button_event(struct input_polled_dev *dev,
 				   struct gpio_keys_button *button,
@@ -74,18 +99,153 @@ static void gpio_keys_polled_check_state(struct input_polled_dev *dev,
 					 struct gpio_keys_button_data *bdata)
 {
 	int state;
+	int down;
 
 	if (bdata->can_sleep)
 		state = !!gpiod_get_value_cansleep(button->gpiod);
 	else
 		state = !!gpiod_get_value(button->gpiod);
 
-	gpio_keys_button_event(dev, button, state);
+	down = state;
+	if (button->inverted_as_input)
+		down = !down;
 
 	if (state != bdata->last_state) {
+		unsigned int type = button->type ?: EV_KEY;
+
+		if (unlikely(button->is_reset_button && !bdata->is_input && down)) {
+			if (reset_force_crash) {
+				pr_info("Reset button interpreted as forced crash\n");
+				abort_brightsign();
+			} else {
+				pr_info("Reset button pressed\n");
+				ctrl_alt_del ();
+			}
+		}
+
+		if (button->is_reset_becomes_crash_button)
+			reset_force_crash = down;
+
 		bdata->count = 0;
 		bdata->last_state = state;
+		gpio_keys_button_event(dev, button, down);
 	}
+}
+
+static int gpio_keys_find_button (struct gpio_keys_polled_dev *bdev, int code)
+{
+	int i;
+	const struct gpio_keys_platform_data *pdata = bdev->pdata;
+
+	for (i = 0; i < bdev->pdata->nbuttons; i++) {
+		struct gpio_keys_button *button = &pdata->buttons[i];
+		if (button->code == code)
+			return i;
+	}
+
+	return -1;
+}
+
+static int gpio_keys_set_polled(struct gpio_keys_polled_dev *bdev, int code, int value)
+{
+	int i = gpio_keys_find_button (bdev, code);
+	if (i != -1) {
+		int error = 0;
+		const struct gpio_keys_platform_data *pdata = bdev->pdata;
+		struct gpio_keys_button_data *bdata = &bdev->data[i];
+		struct gpio_keys_button *button = &pdata->buttons[i];
+
+		// Can't control polling for LEDs
+		if (button->type == EV_LED)
+			return -EINVAL;
+
+		bdata->is_polled = !!value;
+		if (bdata->is_polled != bdata->is_claimed) {
+			if (bdata->is_claimed) {
+				gpio_free(button->gpio);
+				bdata->is_claimed = false;
+			} else {
+				error = gpio_request(button->gpio, button->desc ? : DRV_NAME);
+				if (error) {
+					dev_err(bdev->dev, "unable to claim gpio %u, err=%d\n",
+						button->gpio, error);
+					bdata->is_polled = false;
+					return error;
+				}
+				bdata->is_claimed = true;
+			}
+		}
+
+		return error;
+	}
+
+	return -ENODEV;
+}
+
+static int gpio_keys_set_direction(struct gpio_keys_polled_dev *bdev, int code, int value)
+{
+	int i = gpio_keys_find_button (bdev, code);
+	if (i != -1) {
+		int error = 0;
+		const struct gpio_keys_platform_data *pdata = bdev->pdata;
+		struct gpio_keys_button_data *bdata = &bdev->data[i];
+		struct gpio_keys_button *button = &pdata->buttons[i];
+
+		// Can't swap direction for LEDs
+		if (button->type == EV_LED)
+			return -EINVAL;
+
+		bdata->is_input = !value;
+
+		if (!button->is_reset_button)
+		{
+			if (bdata->is_input)
+				error = gpio_direction_input (button->gpio);
+			else
+				error = gpio_direction_output (button->gpio, button->active_low ? 1 : 0);
+		}
+
+		return error;
+	}
+
+	return -ENODEV;
+}
+
+static int gpio_keys_set_output(struct gpio_keys_polled_dev *bdev, int code, int value)
+{
+	int i = gpio_keys_find_button (bdev, code);
+	if (i != -1) {
+		const struct gpio_keys_platform_data *pdata = bdev->pdata;
+		struct gpio_keys_button_data *bdata = &bdev->data[i];
+		struct gpio_keys_button *button = &pdata->buttons[i];
+
+		if (bdata->is_input || button->is_reset_button) {
+			return -EINVAL;
+		}
+
+		gpiod_set_value_cansleep (gpio_to_desc(button->gpio), button->active_low ? !value : value);
+
+		return 0;
+	}
+
+	return -ENODEV;
+}
+
+static int gpio_keys_input_event(struct input_dev *input_dev, unsigned int type, unsigned int code, int value)
+{
+	struct input_polled_dev *dev = input_get_drvdata (input_dev);
+	struct gpio_keys_polled_dev *bdev = dev->private;
+
+	if (type == EV_LED) {
+		if (code >= 64)
+			return gpio_keys_set_polled (bdev, code - 64, value);
+		else if (code >= 32)
+			return gpio_keys_set_direction (bdev, code - 32, value);
+		else
+			return gpio_keys_set_output (bdev, code, value);
+	}
+
+	return -1;
 }
 
 static void gpio_keys_polled_poll(struct input_polled_dev *dev)
@@ -101,14 +261,17 @@ static void gpio_keys_polled_poll(struct input_polled_dev *dev)
 	for (i = 0; i < pdata->nbuttons; i++) {
 		struct gpio_keys_button_data *bdata = &bdev->data[i];
 
-		if (bdata->count < bdata->threshold) {
+		if (!bdata->is_input && !pdata->buttons[i].is_reset_button)
+			continue;
+
+		if (!bdata->is_polled && !pdata->buttons[i].is_reset_button)
+			continue;
+
+		if (bdata->count < bdata->threshold)
 			bdata->count++;
-			gpio_keys_button_event(dev, &pdata->buttons[i],
-					       bdata->last_state);
-		} else {
+		else
 			gpio_keys_polled_check_state(dev, &pdata->buttons[i],
 						     bdata);
-		}
 	}
 
 	for_each_set_bit(i, input->relbit, REL_CNT) {
@@ -193,6 +356,12 @@ static struct gpio_keys_platform_data *gpio_keys_polled_get_devtree_pdata(struct
 		if (fwnode_property_read_u32(child, "linux,input-type",
 					     &button->type))
 			button->type = EV_KEY;
+
+		button->is_reset_button = fwnode_property_present(child, "brightsign,reset");
+		button->is_reset_becomes_crash_button = fwnode_property_present(child, "brightsign,reset-becomes-crash");
+		button->preserve_state = fwnode_property_present(child, "brightsign,preserve-state");
+		button->is_bidirectional = fwnode_property_present(child, "brightsign,bidirectional");
+		button->inverted_as_input = fwnode_property_present(child, "brightsign,input-inverted");
 
 		if (fwnode_property_read_u32(child, "linux,input-value",
 					     (u32 *)&button->value))
@@ -289,6 +458,7 @@ static int gpio_keys_polled_probe(struct platform_device *pdev)
 
 	input->name = pdev->name;
 	input->phys = DRV_NAME"/input0";
+	input->event = gpio_keys_input_event;
 
 	input->id.bustype = BUS_HOST;
 	input->id.vendor = 0x0001;
@@ -319,15 +489,54 @@ static int gpio_keys_polled_probe(struct platform_device *pdev)
 			if (button->active_low)
 				flags |= GPIOF_ACTIVE_LOW;
 
-			error = devm_gpio_request_one(&pdev->dev, button->gpio,
-					flags, button->desc ? : DRV_NAME);
+			/* We must leave pin configured as the
+			 * bootloader left it in case we're preserving
+			 * the state. That means that we can't use
+			 * devm_gpio_request_one here as upstream
+			 * does. */
+			error = gpio_request(button->gpio, button->desc ? : DRV_NAME);
 			if (error) {
 				dev_err(dev, "unable to claim gpio %u, err=%d\n",
 					button->gpio, error);
 				return error;
 			}
-
 			button->gpiod = gpio_to_desc(button->gpio);
+		}
+		else
+		{
+			button->gpio = desc_to_gpio(button->gpiod);
+		}
+
+		bdata->is_claimed = true;
+
+		if (button->type == EV_LED) {
+			int val = button->active_low ? 1 : 0;
+
+			if (button->preserve_state)
+				val = gpio_get_value (button->gpio);
+
+			error = gpio_direction_output (button->gpio, val);
+			if (error) {
+				dev_err(dev,
+					"unable to set direction on gpio %u, err=%d\n",
+					button->gpio, error);
+				return error;
+			}
+		} else {
+			if (button->is_reset_button) {
+				input_set_capability(input, EV_LED, button->code + 32);
+			} else {
+				bdata->is_input = 1;
+				bdata->is_polled = 1;
+			}
+
+			error = gpio_direction_input(button->gpio);
+			if (error) {
+				dev_err(dev,
+					"unable to set direction on gpio %u, err=%d\n",
+					button->gpio, error);
+				return error;
+			}
 		}
 
 		if (IS_ERR(button->gpiod))
@@ -342,6 +551,11 @@ static int gpio_keys_polled_probe(struct platform_device *pdev)
 		if (type == EV_ABS)
 			gpio_keys_polled_set_abs_params(input, pdata,
 							button->code);
+		if (button->is_bidirectional) {
+			input_set_capability(input, EV_LED, button->code);
+			input_set_capability(input, EV_LED, button->code + 32);
+			input_set_capability(input, EV_LED, button->code + 64);
+		}
 	}
 
 	bdev->poll_dev = poll_dev;
@@ -357,9 +571,19 @@ static int gpio_keys_polled_probe(struct platform_device *pdev)
 	}
 
 	/* report initial state of the buttons */
-	for (i = 0; i < pdata->nbuttons; i++)
-		gpio_keys_polled_check_state(poll_dev, &pdata->buttons[i],
-					     &bdev->data[i]);
+	for (i = 0; i < pdata->nbuttons; i++) {
+		input_event(input, EV_LED, pdata->buttons[i].code + 64, 1);
+		if (bdev->data[i].is_input || pdata->buttons[i].is_reset_button) {
+			input_event(input, EV_LED, pdata->buttons[i].code + 32, !bdev->data[i].is_input);
+			gpio_keys_polled_check_state(poll_dev, &pdata->buttons[i], &bdev->data[i]);
+		} else if (pdata->buttons[i].preserve_state) {
+			/* the actual preservation happened above when
+			 * we requested the GPIO. We just need to make
+			 * sure that the input layer knows what the
+			 * current state is. */
+			input_event(input, EV_LED, pdata->buttons[i].code, gpio_get_value(pdata->buttons[i].gpio) != pdata->buttons[i].active_low);
+		}
+	}
 
 	input_sync(input);
 

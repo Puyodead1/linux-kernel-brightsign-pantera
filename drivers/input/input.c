@@ -223,7 +223,16 @@ static int input_handle_abs_event(struct input_dev *dev,
 		 * get actual touch data.
 		 */
 		if (mt && *pval >= 0 && *pval < mt->num_slots)
+		{
 			mt->slot = *pval;
+			if(dev->absinfo)
+			{
+				input_mt_set_value(&mt->slots[mt->slot], ABS_MT_POSITION_X,
+							dev->absinfo[ABS_MT_POSITION_X].maximum+1);
+				input_mt_set_value(&mt->slots[mt->slot], ABS_MT_POSITION_Y,
+							dev->absinfo[ABS_MT_POSITION_Y].maximum+1);
+			}
+		}
 
 		return INPUT_IGNORE_EVENT;
 	}

@@ -1509,6 +1509,15 @@ config PRINTK_NMI
 	depends on PRINTK
 	depends on HAVE_NMI
 
+config PRESERVE_PRINTK_OVER_REBOOT
+       default n
+       bool "Preserve printk over reboot" if EMBEDDED
+       depends on PRINTK
+       help
+         On certain hardware it is possible to preserve the printk
+         buffer over a reboot and make it available in the subsequent
+         kernel.
+
 config BUG
 	bool "BUG() support" if EXPERT
 	default y
@@ -1526,6 +1535,11 @@ config ELF_CORE
 	help
 	  Enable support for generating core dumps. Disabling saves about 4k.
 
+config LTCORE_MAX_PAGES
+       int "Number of pages to reserve for storing little core dumps"
+       depends on ELF_CORE
+       range 64 16384
+       default 512
 
 config PCSPKR_PLATFORM
 	bool "Enable PC-Speaker support" if EXPERT

@@ -19,6 +19,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/clk.h>
+#include <linux/of_gpio.h>
 
 #include "8250.h"
 
@@ -63,22 +64,25 @@ static int of_platform_serial_setup(struct platform_device *ofdev,
 	int ret;
 
 	memset(port, 0, sizeof *port);
-	if (of_property_read_u32(np, "clock-frequency", &clk)) {
-
-		/* Get clk rate through clk driver if present */
-		info->clk = devm_clk_get(&ofdev->dev, NULL);
-		if (IS_ERR(info->clk)) {
+	/* Get clk rate through clk driver if present */
+	info->clk = devm_clk_get(&ofdev->dev, NULL);
+	if (IS_ERR(info->clk)) {
+		if (PTR_ERR(info->clk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		if (of_property_read_u32(np, "clock-frequency", &clk)) {
 			dev_warn(&ofdev->dev,
 				"clk or clock-frequency not defined\n");
-			return PTR_ERR(info->clk);
+			return -EINVAL;
 		}
-
+		info->clk = NULL;
+	} else {
 		ret = clk_prepare_enable(info->clk);
 		if (ret < 0)
 			return ret;
 
 		clk = clk_get_rate(info->clk);
 	}
+
 	/* If current-speed was set, then try not to change it. */
 	if (of_property_read_u32(np, "current-speed", &spd) == 0)
 		port->custom_divisor = clk / (16 * spd);
@@ -200,6 +204,12 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 		memset(&port8250, 0, sizeof(port8250));
 		port8250.port = port;
 
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+		struct device_node *np = ofdev->dev.of_node;
+		enum of_gpio_flags flags;
+		port8250.inversion_gpio = of_get_named_gpio_flags(np, "inversion-gpio", 0, &flags);
+		port8250.inversion_gpio_active_low = (flags & OF_GPIO_ACTIVE_LOW) != 0;
+#endif
 		if (port.fifosize)
 			port8250.capabilities = UART_CAP_FIFO;
 

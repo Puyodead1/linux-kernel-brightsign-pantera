@@ -36,6 +36,7 @@
 #include <linux/compat.h>
 #include <linux/pm_runtime.h>
 #include <linux/idr.h>
+#include <linux/leds.h>
 
 #include <linux/mmc/ioctl.h>
 #include <linux/mmc/card.h>
@@ -47,6 +48,7 @@
 
 #include "queue.h"
 #include "block.h"
+#include "../core/core.h"	/* For mmc_set_bus_width() */
 
 MODULE_ALIAS("mmc:block");
 #ifdef MODULE_PARAM_PREFIX
@@ -460,13 +462,17 @@ out:
 	return err;
 }
 
+#define MAX_SG_CHUNK	(32768)
+#define NUM_SG_ELEMS	(8)
+
 static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 			       struct mmc_blk_ioc_data *idata)
 {
+
 	struct mmc_command cmd = {0};
 	struct mmc_data data = {0};
 	struct mmc_request mrq = {NULL};
-	struct scatterlist sg;
+	struct scatterlist sg[NUM_SG_ELEMS];
 	int err;
 	int is_rpmb = false;
 	u32 status = 0;
@@ -481,13 +487,32 @@ static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 	cmd.arg = idata->ic.arg;
 	cmd.flags = idata->ic.flags;
 
+	if (cmd.flags & MMC_DISABLE_WIDE) {
+		mmc_set_bus_width(card->host, MMC_BUS_WIDTH_1);
+		pr_debug("%s: Set bus to 1-bit mode\n", mmc_hostname(card->host));
+	}
+
 	if (idata->buf_bytes) {
-		data.sg = &sg;
-		data.sg_len = 1;
+		int sgidx = 0;
+		void *curptr = idata->buf;
+		int remain = idata->buf_bytes;
+		int blklen;
+
+		data.sg = sg;
 		data.blksz = idata->ic.blksz;
 		data.blocks = idata->ic.blocks;
 
-		sg_init_one(data.sg, idata->buf, idata->buf_bytes);
+		sg_init_table(sg, NUM_SG_ELEMS);
+		while(remain > 0) {
+			blklen = min(remain, MAX_SG_CHUNK);
+			sg_set_buf(&sg[sgidx], curptr, blklen);
+			curptr += blklen;
+			remain -= blklen;
+			sgidx++;
+			/* MMC_IOC_MAX_BYTES / MAX_SG_CHUNK must be < NUM_SG_ELEMS */
+			BUG_ON(sgidx > NUM_SG_ELEMS);
+		}
+		data.sg_len = sgidx;
 
 		if (idata->ic.write_flag)
 			data.flags = MMC_DATA_WRITE;
@@ -2153,6 +2178,11 @@ int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 	struct mmc_host *host = card->host;
 	unsigned long flags;
 	bool req_is_special = mmc_req_is_special(req);
+
+#if defined(CONFIG_LEDS_TRIGGER_DISK)
+	/* Panther does this in hardware */
+	ledtrig_disk_activity();
+#endif
 
 	if (req && !mq->mqrq_prev->req)
 		/* claim host only for the first request */

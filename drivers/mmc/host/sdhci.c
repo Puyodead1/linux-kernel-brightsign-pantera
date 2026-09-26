@@ -922,7 +922,8 @@ static void sdhci_set_transfer_mode(struct sdhci_host *host,
 		 * If we are sending CMD23, CMD12 never gets sent
 		 * on successful completion (so no Auto-CMD12).
 		 */
-		if (sdhci_auto_cmd12(host, cmd->mrq) &&
+		/* BrightSign: use flag to inhibit CMD12 when using manufacturer custom commands */
+		if (!(cmd->flags & MMC_CMD12_NONE) && sdhci_auto_cmd12(host, cmd->mrq) &&
 		    (cmd->opcode != SD_IO_RW_EXTENDED))
 			mode |= SDHCI_TRNS_AUTO_CMD12;
 		else if (cmd->mrq->sbc && (host->flags & SDHCI_AUTO_CMD23)) {
@@ -1445,6 +1446,9 @@ void sdhci_set_power_noreg(struct sdhci_host *host, unsigned char mode,
 		if (!(host->quirks & SDHCI_QUIRK_SINGLE_POWER_WRITE))
 			sdhci_writeb(host, 0, SDHCI_POWER_CONTROL);
 
+		/* BrightSign - Delay with power off so that power to the SD card makes it to fully off */
+		mdelay(10);
+
 		/*
 		 * At least the Marvell CaFe chip gets confused if we set the
 		 * voltage and set turn on power at the same time, so set the
@@ -1891,6 +1895,10 @@ static int sdhci_start_signal_voltage_switch(struct mmc_host *mmc,
 
 		return -EAGAIN;
 	case MMC_SIGNAL_VOLTAGE_180:
+		/* If we don't support 1.8V, refuse to enable it */
+		if (host->quirks2 & (SDHCI_QUIRK2_NO_1_8_V | SDHCI_QUIRK2_DISABLE_1_8_V))
+			return -EIO;
+
 		if (!(host->flags & SDHCI_SIGNALING_180))
 			return -EINVAL;
 		if (!IS_ERR(mmc->supply.vqmmc)) {
@@ -1908,6 +1916,13 @@ static int sdhci_start_signal_voltage_switch(struct mmc_host *mmc,
 		 */
 		ctrl |= SDHCI_CTRL_VDD_180;
 		sdhci_writew(host, ctrl, SDHCI_HOST_CONTROL2);
+
+		/* The spec says to wait for 5ms. That's done in
+		 * mmc_set_signal_voltage. Unfortunately the
+		 * early-revision Tiger boards require a bit longer.
+		 * We should probably move this there sometime. */
+		if (host->quirks2 & SDHCI_QUIRK2_SLOW_VOLTAGE_STABILISATION)
+			usleep_range(35000, 35500);
 
 		/* Some controller need to do more when switching */
 		if (host->ops->voltage_switch)
@@ -1963,7 +1978,7 @@ static int sdhci_prepare_hs400_tuning(struct mmc_host *mmc, struct mmc_ios *ios)
 	return 0;
 }
 
-static int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode)
+int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
 	u16 ctrl;
@@ -2172,6 +2187,7 @@ out_unlock:
 	spin_unlock_irqrestore(&host->lock, flags);
 	return err;
 }
+EXPORT_SYMBOL_GPL(sdhci_execute_tuning);
 
 static int sdhci_select_drive_strength(struct mmc_card *card,
 				       unsigned int max_dtr, int host_drv,
@@ -3007,6 +3023,138 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	return host;
 }
 
+static ssize_t signal_voltage_show(struct device *dev,
+                struct device_attribute *attr, char *buf)
+{
+        struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
+	struct sdhci_host *host = mmc_priv(mmc);
+	bool using1v8 = 0;
+
+	/*
+	 * Signal Voltage Switching is only applicable for Host Controllers
+	 * v3.00 and above.
+	 */
+	if (host->version >= SDHCI_SPEC_300)
+		using1v8 = sdhci_readw(host, SDHCI_HOST_CONTROL2) & SDHCI_CTRL_VDD_180;
+
+        return snprintf(buf, PAGE_SIZE, "%s\n", using1v8 ? "1V8" : "3V3");
+}
+
+static ssize_t uhs_mode_show(struct device *dev,
+                struct device_attribute *attr, char *buf)
+{
+        struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
+	struct sdhci_host *host = mmc_priv(mmc);
+	const char *mode = "none";
+
+	/*
+	 * UHS modes are only applicable to Host Controllers v3.00 and above.
+	 */
+	if (host->version >= SDHCI_SPEC_300) {
+		u32 ctrl2 = sdhci_readw(host, SDHCI_HOST_CONTROL2);
+		if (ctrl2 & SDHCI_CTRL_VDD_180)
+		{
+			switch(ctrl2 & SDHCI_CTRL_UHS_MASK)
+			{
+			case SDHCI_CTRL_HS400:
+				mode = "HS 400";
+				break;
+			case SDHCI_CTRL_UHS_SDR12:
+				mode = "SDR12";
+				break;
+			case SDHCI_CTRL_UHS_SDR25:
+				mode = "SDR25";
+				break;
+                        case SDHCI_CTRL_UHS_SDR50:
+				mode = "SDR50";
+				break;
+                        case SDHCI_CTRL_UHS_SDR104:
+				mode = "SDR104";
+				break;
+                        case SDHCI_CTRL_UHS_DDR50:
+				mode = "DDR50";
+				break;
+			default:
+				mode = "unknown";
+				break;
+			}
+		}
+	}
+        return snprintf(buf, PAGE_SIZE, "%s\n", mode);
+}
+
+static ssize_t signal_voltage_lock_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
+	struct sdhci_host *host = mmc_priv(mmc);
+
+	bool disable_1v8 = 0;
+	/* We can only lock-out 1v8 on host controllers that could ever support it */
+	if (host->version >= SDHCI_SPEC_300)
+		disable_1v8 = (host->quirks2 & SDHCI_QUIRK2_DISABLE_1_8_V);
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", disable_1v8 ? "3V3" : "off");
+}
+
+void mmc_power_cycle(struct mmc_host *host, u32 ocr);
+static ssize_t signal_voltage_lock_store(struct device *dev,
+			    struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct mmc_host *mmc = container_of(dev, struct mmc_host, class_dev);
+	struct sdhci_host *host = mmc_priv(mmc);
+
+	bool valid = false;
+
+	if (count < 3)
+		return -EINVAL;
+
+	if (!strncmp(buf, "3V3", 3)) {
+		host->quirks2 |= SDHCI_QUIRK2_DISABLE_1_8_V;
+		valid = true;
+	} else if (!strncmp(buf, "off", 3)) {
+		host->quirks2 &= ~SDHCI_QUIRK2_DISABLE_1_8_V;
+		valid = true;
+	} else
+		return -EINVAL;
+
+	if (valid) {
+		mmc_power_cycle(mmc, mmc->ocr_avail);
+	}
+
+	return count;
+}
+
+static void sdhci_init_sysfs(struct sdhci_host *host)
+{
+    sysfs_attr_init(&host->signal_voltage.attr);
+    host->signal_voltage.show = signal_voltage_show;
+    host->signal_voltage.attr.name = "signal_voltage";
+    host->signal_voltage.attr.mode = S_IRUGO;
+
+    if (device_create_file(&host->mmc->class_dev, &host->signal_voltage))
+            pr_err("%s: Failed to create signal_voltage sysfs entry\n",
+                                mmc_hostname(host->mmc));
+
+    sysfs_attr_init(&host->signal_voltage_lock.attr);
+    host->signal_voltage_lock.show = signal_voltage_lock_show;
+    host->signal_voltage_lock.store = signal_voltage_lock_store;
+    host->signal_voltage_lock.attr.name = "signal_voltage_lock";
+    host->signal_voltage_lock.attr.mode = S_IRUGO | S_IWUSR;
+    if (device_create_file(&host->mmc->class_dev, &host->signal_voltage_lock))
+            pr_err("%s: Failed to create signal_voltage_lock sysfs entry\n",
+                                mmc_hostname(host->mmc));
+
+    sysfs_attr_init(&host->uhs_mode.attr);
+    host->uhs_mode.show = uhs_mode_show;
+    host->uhs_mode.attr.name = "uhs_mode";
+    host->uhs_mode.attr.mode = S_IRUGO;
+    if (device_create_file(&host->mmc->class_dev, &host->uhs_mode))
+            pr_err("%s: Failed to create uhs_mode sysfs entry\n",
+                                mmc_hostname(host->mmc));
+}
+
 EXPORT_SYMBOL_GPL(sdhci_alloc_host);
 
 static int sdhci_set_dma_mask(struct sdhci_host *host)
@@ -3350,7 +3498,7 @@ int sdhci_setup_host(struct sdhci_host *host)
 		}
 	}
 
-	if (host->quirks2 & SDHCI_QUIRK2_NO_1_8_V) {
+	if (host->quirks2 & (SDHCI_QUIRK2_NO_1_8_V | SDHCI_QUIRK2_DISABLE_1_8_V)) {
 		host->caps1 &= ~(SDHCI_SUPPORT_SDR104 | SDHCI_SUPPORT_SDR50 |
 				 SDHCI_SUPPORT_DDR50);
 	}
@@ -3618,6 +3766,7 @@ int __sdhci_add_host(struct sdhci_host *host)
 	ret = mmc_add_host(mmc);
 	if (ret)
 		goto unled;
+	sdhci_init_sysfs(host);
 
 	pr_info("%s: SDHCI controller on %s [%s] using %s\n",
 		mmc_hostname(mmc), host->hw_name, dev_name(mmc_dev(mmc)),

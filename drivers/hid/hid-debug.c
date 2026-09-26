@@ -1040,6 +1040,7 @@ static void hid_dump_input_mapping(struct hid_device *hid, struct seq_file *f)
 					seq_printf(f, "\n");
 				}
 			}
+			seq_printf(f, "\n");
 		}
 	}
 

@@ -335,8 +335,9 @@ struct mgmt_cp_remove_remote_oob_data {
 #define MGMT_OP_START_DISCOVERY		0x0023
 struct mgmt_cp_start_discovery {
 	__u8 type;
+	bool allow_duplicates;
 } __packed;
-#define MGMT_START_DISCOVERY_SIZE	1
+#define MGMT_START_DISCOVERY_SIZE	2
 
 #define MGMT_OP_STOP_DISCOVERY		0x0024
 struct mgmt_cp_stop_discovery {

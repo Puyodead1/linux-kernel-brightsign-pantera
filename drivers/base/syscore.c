@@ -120,12 +120,13 @@ void syscore_shutdown(void)
 
 	mutex_lock(&syscore_ops_lock);
 
+	pr_err("syscore_shutdown...calling shutdown handlers\n");
 	list_for_each_entry_reverse(ops, &syscore_ops_list, node)
 		if (ops->shutdown) {
-			if (initcall_debug)
-				pr_info("PM: Calling %pF\n", ops->shutdown);
+			pr_err("PM: Calling %pF\n", ops->shutdown);
 			ops->shutdown();
 		}
 
+	pr_err("syscore_shutdown complete\n");
 	mutex_unlock(&syscore_ops_lock);
 }

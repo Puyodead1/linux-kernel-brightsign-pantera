@@ -482,6 +482,8 @@ asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
 	char *after_dashes;
+	extern void printk_init(void);
+	printk_init();
 
 	set_task_stack_end_magic(&init_task);
 	smp_setup_processor_id();

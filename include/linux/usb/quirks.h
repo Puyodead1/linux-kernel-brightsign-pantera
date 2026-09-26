@@ -56,7 +56,13 @@
  */
 #define USB_QUIRK_LINEAR_FRAME_INTR_BINTERVAL	BIT(11)
 
+/* Added by BrightSign */
+#define USB_QUIRK_NO_INITIAL_SET_CONFIGURATION	BIT(12)
+
 /* Device needs a pause after every control message. */
 #define USB_QUIRK_DELAY_CTRL_MSG		BIT(13)
+
+/* BrightSign: Check for disconnection during reset */
+#define USB_QUIRK_CHECK_DISCONNECT_DURING_RESET	BIT(14)
 
 #endif /* __LINUX_USB_QUIRKS_H */

@@ -404,7 +404,7 @@ done:
 	return nr;
 }
 
-static int coredump_wait(int exit_code, struct core_state *core_state)
+int coredump_wait(int exit_code, struct core_state *core_state)
 {
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
@@ -442,7 +442,7 @@ static int coredump_wait(int exit_code, struct core_state *core_state)
 	return core_waiters;
 }
 
-static void coredump_finish(struct mm_struct *mm, bool core_dumped)
+void coredump_finish(struct mm_struct *mm, bool core_dumped)
 {
 	struct core_thread *curr, *next;
 	struct task_struct *task;
@@ -777,6 +777,10 @@ fail:
 	return;
 }
 
+int little_core_dump = 0;
+int ltcore_dump_cnt __attribute__ ((section (".bss_noinit")));
+char ltcore_dump_file[CONFIG_LTCORE_MAX_PAGES*PAGE_SIZE] __attribute__ ((section (".bss_noinit")));
+
 /*
  * Core dumping helper functions.  These are the only things you should
  * do on a core-file: use only these functions to write out all the
@@ -784,11 +788,33 @@ fail:
  */
 int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
 {
+	if (cprm->written + nr > cprm->limit)
+		return 0;
+
+	if (little_core_dump) {
+		while (nr) {
+			if (dump_interrupted())
+				return 0;
+			unsigned page = ltcore_dump_cnt >> PAGE_SHIFT;
+			unsigned offset = ltcore_dump_cnt & ~PAGE_MASK;
+			unsigned chnk = PAGE_SIZE - offset;
+			if (nr < chnk) chnk = nr;
+			if (ltcore_dump_cnt >= CONFIG_LTCORE_MAX_PAGES*PAGE_SIZE)
+				return 0;
+			memcpy(ltcore_dump_file + page*PAGE_SIZE + offset, addr, chnk);
+			ltcore_dump_cnt += chnk;
+			nr -= chnk;
+			addr = (char*)addr + chnk;
+			cprm->written += chnk;
+			cprm->pos += chnk;
+		}
+		return 1;
+	}
+
 	struct file *file = cprm->file;
 	loff_t pos = file->f_pos;
 	ssize_t n;
-	if (cprm->written + nr > cprm->limit)
-		return 0;
+
 	while (nr) {
 		if (dump_interrupted())
 			return 0;
@@ -808,7 +834,7 @@ int dump_skip(struct coredump_params *cprm, size_t nr)
 {
 	static char zeroes[PAGE_SIZE];
 	struct file *file = cprm->file;
-	if (file->f_op->llseek && file->f_op->llseek != no_llseek) {
+	if (!little_core_dump && file->f_op->llseek && file->f_op->llseek != no_llseek) {
 		if (dump_interrupted() ||
 		    file->f_op->llseek(file, nr, SEEK_CUR) < 0)
 			return 0;
@@ -844,7 +870,7 @@ void dump_truncate(struct coredump_params *cprm)
 	struct file *file = cprm->file;
 	loff_t offset;
 
-	if (file->f_op->llseek && file->f_op->llseek != no_llseek) {
+	if (file && file->f_op->llseek && file->f_op->llseek != no_llseek) {
 		offset = file->f_op->llseek(file, 0, SEEK_CUR);
 		if (i_size_read(file->f_mapping->host) < offset)
 			do_truncate(file->f_path.dentry, offset, 0, file);

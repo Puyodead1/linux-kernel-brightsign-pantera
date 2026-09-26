@@ -501,4 +501,18 @@ static inline void set_kernel_text_ro(void) { }
 void flush_uprobe_xol_access(struct page *page, unsigned long uaddr,
 			     void *kaddr, unsigned long len);
 
+/*
+ * BrightSign addition to force kernel memory to be flushed out to
+ * cache as cheaply as possible using a name that we can implement on
+ * multiples arches.
+ */
+static inline void force_writeback(void *start, size_t len)
+{
+	/* If we're MULTI_CACHE then this function might be called
+	 * from printk before __cpuc_flush_dcache_area has been
+	 * assigned via cpu_cache in setup_processor(). In that case
+	 * we won't do anything. */
+	if (likely(__cpuc_flush_dcache_area))
+		__cpuc_flush_dcache_area(start, len);
+}
 #endif

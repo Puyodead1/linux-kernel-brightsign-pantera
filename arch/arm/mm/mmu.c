@@ -1124,10 +1124,15 @@ void __init debug_ll_io_init(void)
 static void * __initdata vmalloc_min =
 	(void *)(VMALLOC_END - (240 << 20) - VMALLOC_OFFSET);
 
+static bool __initdata brcmstb_did_override_vmalloc;
+
 /*
  * vmalloc=size forces the vmalloc area to be exactly 'size'
  * bytes. This can be used to increase (or decrease) the vmalloc
  * area - the default is 240m.
+ *
+ * NOTE: different default for BRCMSTB with >= 1GiB RAM, see
+ * brcmstb_maybe_increase_vmalloc() below.
  */
 static int __init early_vmalloc(char *arg)
 {
@@ -1146,9 +1151,24 @@ static int __init early_vmalloc(char *arg)
 	}
 
 	vmalloc_min = (void *)(VMALLOC_END - vmalloc_reserve);
+	brcmstb_did_override_vmalloc = true;
 	return 0;
 }
 early_param("vmalloc", early_vmalloc);
+
+static void __init brcmstb_maybe_increase_vmalloc(void)
+{
+#ifdef CONFIG_BRCMSTB
+	if (brcmstb_did_override_vmalloc)
+		return;
+	if (memblock.memory.total_size >= SZ_1G) {
+		vmalloc_min = (void *)(VMALLOC_END - (744 << 20) -
+				VMALLOC_OFFSET);
+	}
+#else
+	return;
+#endif
+}
 
 phys_addr_t arm_lowmem_limit __initdata = 0;
 
@@ -1159,6 +1179,8 @@ void __init adjust_lowmem_bounds(void)
 	struct memblock_region *reg;
 	phys_addr_t lowmem_limit = 0;
 
+	brcmstb_maybe_increase_vmalloc();
+
 	/*
 	 * Let's use our own (unoptimized) equivalent of __pa() that is
 	 * not affected by wrap-arounds when sizeof(phys_addr_t) == 4.
@@ -1167,6 +1189,11 @@ void __init adjust_lowmem_bounds(void)
 	 * and therefore __pa() is defined.
 	 */
 	vmalloc_limit = (u64)(uintptr_t)vmalloc_min - PAGE_OFFSET + PHYS_OFFSET;
+
+#ifdef CONFIG_ZONE_MOVABLE
+	if (movable_start && vmalloc_limit > (u64)__pfn_to_phys(movable_start))
+		vmalloc_limit = (u64)__pfn_to_phys(movable_start);
+#endif
 
 	for_each_memblock(memory, reg) {
 		phys_addr_t block_start = reg->base;
@@ -1422,11 +1449,7 @@ static void __init kmap_init(void)
 static void __init map_lowmem(void)
 {
 	struct memblock_region *reg;
-#ifdef CONFIG_XIP_KERNEL
-	phys_addr_t kernel_x_start = round_down(__pa(_sdata), SECTION_SIZE);
-#else
-	phys_addr_t kernel_x_start = round_down(__pa(_stext), SECTION_SIZE);
-#endif
+	phys_addr_t kernel_x_start = round_down(__pa(KERNEL_START), SECTION_SIZE);
 	phys_addr_t kernel_x_end = round_up(__pa(__init_end), SECTION_SIZE);
 
 	/* Map all the lowmem memory banks. */

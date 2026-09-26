@@ -1178,6 +1178,8 @@ static int pegasus_probe(struct usb_interface *intf,
 	pegasus->usb = dev;
 	pegasus->net = net;
 
+	// BrightSign: We want consistent naming for all USB devices, and for them not to be "eth0".
+	strcpy (net->name, "usb%d");
 
 	net->watchdog_timeo = PEGASUS_TX_TIMEOUT;
 	net->netdev_ops = &pegasus_netdev_ops;

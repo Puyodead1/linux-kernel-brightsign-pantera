@@ -64,6 +64,7 @@
 #include <linux/page_owner.h>
 #include <linux/kthread.h>
 #include <linux/memcontrol.h>
+#include <linux/of.h>
 
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
@@ -1188,6 +1189,10 @@ static void __meminit __init_single_page(struct page *page, unsigned long pfn,
 	init_page_count(page);
 	page_mapcount_reset(page);
 	page_cpupid_reset_last(page);
+#ifdef CONFIG_PAGE_AUTOMAP
+	if (memblock_is_automap_memory(pfn << PAGE_SHIFT))
+		SetPageAutoMap(page);
+#endif
 
 	INIT_LIST_HEAD(&page->lru);
 #ifdef WANT_PAGE_VIRTUAL
@@ -1605,9 +1610,10 @@ void __init page_alloc_init_late(void)
 		set_zone_contiguous(zone);
 }
 
-#ifdef CONFIG_CMA
-/* Free whole pageblock and set its migration type to MIGRATE_CMA. */
-void __init init_cma_reserved_pageblock(struct page *page)
+#if defined(CONFIG_CMA) || defined(CONFIG_BRCMSTB_HUGEPAGES)
+/* Free whole pageblock and set its migration type */
+static void __init __init_reserved_pageblock(struct page *page,
+					     int migratetype)
 {
 	unsigned i = pageblock_nr_pages;
 	struct page *p = page;
@@ -1617,7 +1623,7 @@ void __init init_cma_reserved_pageblock(struct page *page)
 		set_page_count(p, 0);
 	} while (++p, --i);
 
-	set_pageblock_migratetype(page, MIGRATE_CMA);
+	set_pageblock_migratetype(page, migratetype);
 
 	if (pageblock_order >= MAX_ORDER) {
 		i = pageblock_nr_pages;
@@ -1633,6 +1639,22 @@ void __init init_cma_reserved_pageblock(struct page *page)
 	}
 
 	adjust_managed_page_count(page, pageblock_nr_pages);
+}
+#endif /* defined(CONFIG_CMA) || defined(CONFIG_BRCMSTB_HUGEPAGES) */
+
+#ifdef CONFIG_BRCMSTB_HUGEPAGES
+/* Free whole pageblock and set its migration type to MIGRATE_MOVABLE. */
+void __init init_bhpa_reserved_pageblock(struct page *page)
+{
+	__init_reserved_pageblock(page, MIGRATE_MOVABLE);
+}
+#endif
+
+#ifdef CONFIG_CMA
+/* Free whole pageblock and set its migration type to MIGRATE_CMA. */
+void __init init_cma_reserved_pageblock(struct page *page)
+{
+	__init_reserved_pageblock(page, MIGRATE_CMA);
 }
 #endif
 
@@ -6767,6 +6789,18 @@ int __meminit init_per_zone_wmark_min(void)
 	lowmem_kbytes = nr_free_buffer_pages() * (PAGE_SIZE >> 10);
 	new_min_free_kbytes = int_sqrt(lowmem_kbytes * 16);
 
+	/* BrightSign: Increase the default free space on tiger to avoid
+	 * critical memory situations when we have a burst of activity.
+	 * A shortage has been observed on 7252 based units.  See #20584.
+	 */
+
+#ifdef CONFIG_OF
+	if (of_machine_is_compatible("brightsign,tiger")) {
+		if (new_min_free_kbytes < 8192)
+			new_min_free_kbytes = 8192;
+	}
+#endif
+
 	if (new_min_free_kbytes > user_min_free_kbytes) {
 		min_free_kbytes = new_min_free_kbytes;
 		if (min_free_kbytes < 128)
@@ -6777,6 +6811,7 @@ int __meminit init_per_zone_wmark_min(void)
 		pr_warn("min_free_kbytes is not updated to %d because user defined value %d is preferred\n",
 				new_min_free_kbytes, user_min_free_kbytes);
 	}
+
 	setup_per_zone_wmarks();
 	refresh_zone_stat_thresholds();
 	setup_per_zone_lowmem_reserve();
@@ -7190,7 +7225,6 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 	/* This function is based on compact_zone() from compaction.c. */
 	unsigned long nr_reclaimed;
 	unsigned long pfn = start;
-	unsigned int tries = 0;
 	int ret = 0;
 
 	migrate_prep();
@@ -7208,10 +7242,6 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 				ret = -EINTR;
 				break;
 			}
-			tries = 0;
-		} else if (++tries == 5) {
-			ret = ret < 0 ? ret : -EBUSY;
-			break;
 		}
 
 		nr_reclaimed = reclaim_clean_pages_from_list(cc->zone,
@@ -7220,6 +7250,10 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 
 		ret = migrate_pages(&cc->migratepages, alloc_migrate_target,
 				    NULL, 0, cc->mode, MR_CMA);
+		if (ret) {
+			ret = ret < 0 ? ret : -EBUSY;
+			break;
+		}
 	}
 	if (ret < 0) {
 		putback_movable_pages(&cc->migratepages);

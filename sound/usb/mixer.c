@@ -66,6 +66,11 @@
 
 #define MAX_ID_ELEMS	256
 
+#define BOSE_VENDOR_ID					0x05a7
+#define BOSE_COMPANION5_DEVICE_ID		0x1020
+#define MICROSOFT_VENDOR_ID				0x045e
+#define MICROSOFT_SURFACE_HP_DEVICE_ID	0x0a1b
+
 struct usb_audio_term {
 	int id;
 	int type;
@@ -1004,49 +1009,101 @@ static int get_min_max_with_quirks(struct usb_mixer_elem_info *cval,
 		} else {
 			int last_valid_res = cval->res;
 
-			while (cval->res > 1) {
-				if (snd_usb_mixer_set_ctl_value(cval, UAC_SET_RES,
-								(cval->control << 8) | minchn,
-								cval->res / 2) < 0)
-					break;
-				cval->res /= 2;
+			/*
+			 * Bose Companion 5 misbehaves if the resolution checks are done. The result is that sometimes
+			 * no audio can be heard though from a USB perspective all is well. Quirk it out...
+			 */
+			if(cval->head.mixer->chip->usb_id != USB_ID(BOSE_VENDOR_ID, BOSE_COMPANION5_DEVICE_ID))
+			{
+				while (cval->res > 1) {
+					if (snd_usb_mixer_set_ctl_value(cval, UAC_SET_RES,
+									(cval->control << 8) | minchn,
+									cval->res / 2) < 0)
+						break;
+					cval->res /= 2;
+				}
+				if (get_ctl_value(cval, UAC_GET_RES,
+						  (cval->control << 8) | minchn, &cval->res) < 0)
+					cval->res = last_valid_res;
 			}
-			if (get_ctl_value(cval, UAC_GET_RES,
-					  (cval->control << 8) | minchn, &cval->res) < 0)
-				cval->res = last_valid_res;
 		}
 		if (cval->res == 0)
 			cval->res = 1;
 
-		/* Additional checks for the proper resolution
-		 *
-		 * Some devices report smaller resolutions than actually
-		 * reacting.  They don't return errors but simply clip
-		 * to the lower aligned value.
-		 */
-		if (cval->min + cval->res < cval->max) {
-			int last_valid_res = cval->res;
-			int saved, test, check;
-			get_cur_mix_raw(cval, minchn, &saved);
-			for (;;) {
-				test = saved;
-				if (test < cval->max)
-					test += cval->res;
-				else
-					test -= cval->res;
-				if (test < cval->min || test > cval->max ||
-				    snd_usb_set_cur_mix_value(cval, minchn, 0, test) ||
-				    get_cur_mix_raw(cval, minchn, &check)) {
-					cval->res = last_valid_res;
-					break;
+		if(cval->head.mixer->chip->usb_id != USB_ID(BOSE_VENDOR_ID, BOSE_COMPANION5_DEVICE_ID))
+		{
+			/* Additional checks for the proper resolution
+			 *
+			 * Some devices report smaller resolutions than actually
+			 * reacting.  They don't return errors but simply clip
+			 * to the lower aligned value.
+			 */
+			if (cval->min + cval->res < cval->max) {
+				int last_valid_res = cval->res;
+				int saved, test, check;
+				get_cur_mix_raw(cval, minchn, &saved);
+				for (;;) {
+					test = saved;
+					if (test < cval->max)
+						test += cval->res;
+					else
+						test -= cval->res;
+					if (test < cval->min || test > cval->max ||
+					    snd_usb_set_cur_mix_value(cval, minchn, 0, test) ||
+					    get_cur_mix_raw(cval, minchn, &check)) {
+						cval->res = last_valid_res;
+						break;
+					}
+					if (test == check)
+						break;
+					cval->res *= 2;
 				}
-				if (test == check)
-					break;
-				cval->res *= 2;
+				snd_usb_set_cur_mix_value(cval, minchn, 0, saved);
 			}
-			snd_usb_set_cur_mix_value(cval, minchn, 0, saved);
+
+			if(cval->head.mixer->chip->usb_id == USB_ID(MICROSOFT_VENDOR_ID, MICROSOFT_SURFACE_HP_DEVICE_ID))
+			{
+				/*
+				 * Microsoft Surface headphones report poorer resolution than they actually react to.
+				*/
+				if (cval->min + cval->res < cval->max) {
+					int saved, test, check;
+					get_cur_mix_raw(cval, minchn, &saved);
+					test = 1;
+					while(test < cval->res) {
+						if(snd_usb_set_cur_mix_value(cval, minchn, 0, cval->min + test) || get_cur_mix_raw(cval, minchn, &check)) {
+							test = cval->res;
+							break;
+						}
+						if (cval->min + test == check)
+							break;
+
+						test *= 2;
+					}
+					if(test < cval->res)
+						cval->res = test;
+					snd_usb_set_cur_mix_value(cval, minchn, 0, saved);
+				}
+			}
 		}
 
+		/* 
+		 * Some devices report a current volume which is outwith the min max range
+		 * they claim to support e.g. Bose Companion 5. Bounds check the current setting.
+		 */
+		{
+			int val;
+			snd_usb_get_cur_mix_value(cval, minchn, 0, &val);
+			if(val > cval->max)
+			{
+				snd_usb_set_cur_mix_value(cval, minchn, 0, cval->max);
+			}
+			else if(val < cval->min)
+			{
+				snd_usb_set_cur_mix_value(cval, minchn, 0, cval->min);
+			}
+		}
+		
 		cval->initialized = 1;
 	}
 
@@ -1296,7 +1353,8 @@ static void build_feature_ctl(struct mixer_build *state, void *raw_desc,
 	 * read-only. snd_usb_set_cur_mix_value() will check the mask again and won't
 	 * issue write commands to read-only channels.
 	 */
-	if (cval->channels == readonly_mask)
+	/* BrightSign - Create read only controls for Bose */
+	if (cval->channels == readonly_mask || (USB_ID_VENDOR(state->chip->usb_id) == BOSE_VENDOR_ID))
 		kctl = snd_ctl_new1(&usb_feature_unit_ctl_ro, cval);
 	else
 		kctl = snd_ctl_new1(&usb_feature_unit_ctl, cval);

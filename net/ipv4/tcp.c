@@ -3363,7 +3363,10 @@ void __init tcp_init(void)
 
 	tcp_init_mem();
 	/* Set per-socket limits to no more than 1/128 the pressure threshold */
-	limit = nr_free_buffer_pages() << (PAGE_SHIFT - 7);
+	/* Increase receive window limit by a factor of 2 for better HTTP/HLS
+	 * streaming performance */
+	/*limit = nr_free_buffer_pages() << (PAGE_SHIFT - 7);*/
+	limit = nr_free_buffer_pages() << (PAGE_SHIFT - 6);
 	max_wshare = min(4UL*1024*1024, limit);
 	max_rshare = min(6UL*1024*1024, limit);
 

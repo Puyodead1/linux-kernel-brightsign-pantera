@@ -85,6 +85,7 @@ struct lgdt3305_state {
 #define LGDT3305_CR_MSE_2                     0x011c
 #define LGDT3305_CR_LOCK_STATUS               0x011d
 #define LGDT3305_CR_CTRL_7                    0x0126
+#define LGDT3305_QAM_TR_LOCK_STATUS	      0x021b
 #define LGDT3305_AGC_POWER_REF_1              0x0300
 #define LGDT3305_AGC_POWER_REF_2              0x0301
 #define LGDT3305_AGC_DELAY_PT_1               0x0302
@@ -229,6 +230,20 @@ fail:
 	return ret;
 }
 
+static int lgdt3305_fec_reset(struct lgdt3305_state *state)
+{
+	int ret;
+
+	ret = lgdt3305_set_reg_bit(state, LGDT3305_FEC_BLOCK_CTRL, 3, 0);
+	if (lg_fail(ret))
+		goto fail;
+
+	msleep(20);
+	ret = lgdt3305_set_reg_bit(state, LGDT3305_FEC_BLOCK_CTRL, 3, 1);
+fail:
+	return ret;
+}
+
 static inline int lgdt3305_mpeg_mode(struct lgdt3305_state *state,
 				     enum lgdt3305_mpeg_mode mode)
 {
@@ -293,6 +308,7 @@ static int lgdt3305_set_modulation(struct lgdt3305_state *state,
 		opermode |= 0x01;
 		break;
 	default:
+		pr_err("Invalid modulation specified: 0x%x\n", p->modulation);
 		return -EINVAL;
 	}
 	ret = lgdt3305_write_reg(state, LGDT3305_GEN_CTRL_1, opermode);
@@ -731,8 +747,7 @@ static int lgdt3304_set_parameters(struct dvb_frontend *fe)
 
 
 	ret = lgdt3305_spectral_inversion(state, p,
-					  state->cfg->spectral_inversion
-					  ? 1 : 0);
+					  (p->inversion == INVERSION_ON) ? 1 : 0);
 	if (lg_fail(ret))
 		goto fail;
 
@@ -755,6 +770,13 @@ static int lgdt3305_set_parameters(struct dvb_frontend *fe)
 	int ret;
 
 	lg_dbg("(%d, %d)\n", p->frequency, p->modulation);
+
+
+	if(p->modulation == DQPSK)
+	{
+		/* HACK HACK - Use crazy VSB modulation setting to trigger FEC reset */
+		return lgdt3305_fec_reset(state);
+	}
 
 	if (fe->ops.tuner_ops.set_params) {
 		ret = fe->ops.tuner_ops.set_params(fe);
@@ -791,8 +813,7 @@ static int lgdt3305_set_parameters(struct dvb_frontend *fe)
 	if (lg_fail(ret))
 		goto fail;
 	ret = lgdt3305_spectral_inversion(state, p,
-					  state->cfg->spectral_inversion
-					  ? 1 : 0);
+					  (p->inversion == INVERSION_ON) ? 1 : 0);
 	if (lg_fail(ret))
 		goto fail;
 
@@ -944,8 +965,6 @@ static int lgdt3305_read_status(struct dvb_frontend *fe, enum fe_status *status)
 
 	if (signal)
 		*status |= FE_HAS_SIGNAL;
-	if (cr_lock)
-		*status |= FE_HAS_CARRIER;
 	if (nofecerr)
 		*status |= FE_HAS_VITERBI;
 	if (sync_lock)
@@ -958,6 +977,14 @@ static int lgdt3305_read_status(struct dvb_frontend *fe, enum fe_status *status)
 		if (((LGDT3304 == state->cfg->demod_chip)) && (cr_lock))
 			*status |= FE_HAS_SIGNAL;
 
+               /* The channel scanning app note reads the QAM timing recovery lock register - use that for carrier bit */
+               ret = lgdt3305_read_reg(state,
+                                       LGDT3305_QAM_TR_LOCK_STATUS, &val);
+               if (lg_fail(ret))
+                       goto fail;
+               if((val & 0x7) > 2)
+                       *status |= FE_HAS_CARRIER;
+
 		ret = lgdt3305_read_fec_lock_status(state, &fec_lock);
 		if (lg_fail(ret))
 			goto fail;
@@ -966,6 +993,8 @@ static int lgdt3305_read_status(struct dvb_frontend *fe, enum fe_status *status)
 			*status |= FE_HAS_LOCK;
 		break;
 	case VSB_8:
+		if (cr_lock)
+			*status |= FE_HAS_CARRIER;
 		if (inlock)
 			*status |= FE_HAS_LOCK;
 		break;
@@ -1002,6 +1031,7 @@ static int lgdt3305_read_snr(struct dvb_frontend *fe, u16 *snr)
 
 	switch (state->current_modulation) {
 	case VSB_8:
+#define USE_PTMSE
 #ifdef USE_PTMSE
 		/* Use Phase Tracker Mean-Square Error Register */
 		/* SNR for ranges from -13.11 to +44.08 */
@@ -1169,7 +1199,7 @@ static struct dvb_frontend_ops lgdt3304_ops = {
 	.info = {
 		.name = "LG Electronics LGDT3304 VSB/QAM Frontend",
 		.frequency_min      = 54000000,
-		.frequency_max      = 858000000,
+		.frequency_max      = 1000000000,
 		.frequency_stepsize = 62500,
 		.caps = FE_CAN_QAM_64 | FE_CAN_QAM_256 | FE_CAN_8VSB
 	},
@@ -1192,7 +1222,7 @@ static struct dvb_frontend_ops lgdt3305_ops = {
 	.info = {
 		.name = "LG Electronics LGDT3305 VSB/QAM Frontend",
 		.frequency_min      = 54000000,
-		.frequency_max      = 858000000,
+		.frequency_max      = 1000000000,
 		.frequency_stepsize = 62500,
 		.caps = FE_CAN_QAM_64 | FE_CAN_QAM_256 | FE_CAN_8VSB
 	},

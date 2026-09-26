@@ -61,8 +61,16 @@ struct rlimit64 {
 /*
  * Limit the stack by to some sane default: root can always
  * increase this limit if needed..  8MB seems reasonable.
+ * BUT for BrightSign we have lots of threads and although the stacks
+ * don't take up 8MB of physical memory they do count against our
+ * virtual memory for overcommit purposes. Let's use a more sane
+ * initial limit.
  */
-#define _STK_LIM	(8*1024*1024)
+#if __BITS_PER_LONG == 64
+#define _STK_LIM	(2*1024*1024)
+#else
+#define _STK_LIM	(1*1024*1024)
+#endif
 
 /*
  * GPG2 wants 64kB of mlocked memory, to make sure pass phrases

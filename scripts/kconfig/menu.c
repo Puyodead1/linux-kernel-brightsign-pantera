@@ -602,18 +602,6 @@ static void get_prompt_str(struct gstr *r, struct property *prop,
 }
 
 /*
- * get property of type P_SYMBOL
- */
-static struct property *get_symbol_prop(struct symbol *sym)
-{
-	struct property *prop = NULL;
-
-	for_all_properties(sym, prop, P_SYMBOL)
-		break;
-	return prop;
-}
-
-/*
  * head is optional and may be NULL
  */
 static void get_symbol_str(struct gstr *r, struct symbol *sym,
@@ -638,15 +626,22 @@ static void get_symbol_str(struct gstr *r, struct symbol *sym,
 	for_all_prompts(sym, prop)
 		get_prompt_str(r, prop, head);
 
-	prop = get_symbol_prop(sym);
-	if (prop) {
-		str_printf(r, _("  Defined at %s:%d\n"), prop->menu->file->name,
+	hit = false;
+	for_all_properties(sym, prop, P_SYMBOL) {
+		if (!hit) {
+			str_append(r, "  Defined at ");
+			hit = true;
+		} else
+			str_append(r, ", ");
+		str_printf(r, _("%s:%d"), prop->menu->file->name,
 			prop->menu->lineno);
-		if (!expr_is_yes(prop->visible.expr)) {
-			str_append(r, _("  Depends on: "));
-			expr_gstr_print(prop->visible.expr, r);
-			str_append(r, "\n");
-		}
+	}
+	if (hit)
+		str_append(r, "\n");
+	if (!expr_is_yes(sym->dir_dep.expr)) {
+		str_append(r, _("  Depends on: "));
+		expr_gstr_print(sym->dir_dep.expr, r);
+		str_append(r, "\n");
 	}
 
 	hit = false;

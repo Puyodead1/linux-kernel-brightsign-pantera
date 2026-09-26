@@ -33,3 +33,8 @@ obj-$(CONFIG_PCIE_ARMADA_8K) += pcie-armada8k.o
 obj-$(CONFIG_PCIE_ARTPEC6) += pcie-artpec6.o
 obj-$(CONFIG_PCIE_ROCKCHIP) += pcie-rockchip.o
 obj-$(CONFIG_VMD) += vmd.o
+obj-$(CONFIG_PCIE_BRCMSTB) += pci_brcmstb.o
+pci_brcmstb-objs += pci-brcmstb.o pci-brcmstb-dma.o
+ifdef CONFIG_PCI_MSI
+	pci_brcmstb-objs += pci-brcmstb-msi.o
+endif

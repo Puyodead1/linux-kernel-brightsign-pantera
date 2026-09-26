@@ -35,6 +35,7 @@
 #define CLK_IS_CRITICAL		BIT(11) /* do not gate, ever */
 /* parents need enable during gate/ungate, set rate and re-parent */
 #define CLK_OPS_PARENT_ENABLE	BIT(12)
+#define CLK_IS_SW		BIT(13) /* sw clk, multiple active parents */
 
 struct clk;
 struct clk_hw;
@@ -439,6 +440,7 @@ struct clk_hw *clk_hw_register_divider_table(struct device *dev,
 		spinlock_t *lock);
 void clk_unregister_divider(struct clk *clk);
 void clk_hw_unregister_divider(struct clk_hw *hw);
+void of_divider_clk_setup(struct device_node *node);
 
 /**
  * struct clk_mux - multiplexer clock
@@ -510,6 +512,7 @@ void clk_unregister_mux(struct clk *clk);
 void clk_hw_unregister_mux(struct clk_hw *hw);
 
 void of_fixed_factor_clk_setup(struct device_node *node);
+void of_mux_clk_setup(struct device_node *node);
 
 /**
  * struct clk_fixed_factor - fixed multiplier and divider clock
@@ -532,6 +535,7 @@ struct clk_fixed_factor {
 #define to_clk_fixed_factor(_hw) container_of(_hw, struct clk_fixed_factor, hw)
 
 extern const struct clk_ops clk_fixed_factor_ops;
+
 struct clk *clk_register_fixed_factor(struct device *dev, const char *name,
 		const char *parent_name, unsigned long flags,
 		unsigned int mult, unsigned int div);
@@ -574,11 +578,17 @@ struct clk *clk_register_fractional_divider(struct device *dev,
 		const char *name, const char *parent_name, unsigned long flags,
 		void __iomem *reg, u8 mshift, u8 mwidth, u8 nshift, u8 nwidth,
 		u8 clk_divider_flags, spinlock_t *lock);
+
 struct clk_hw *clk_hw_register_fractional_divider(struct device *dev,
 		const char *name, const char *parent_name, unsigned long flags,
 		void __iomem *reg, u8 mshift, u8 mwidth, u8 nshift, u8 nwidth,
 		u8 clk_divider_flags, spinlock_t *lock);
 void clk_hw_unregister_fractional_divider(struct clk_hw *hw);
+
+struct clk_mult_table {
+	unsigned int	val;
+	unsigned int	mult;
+};
 
 /**
  * struct clk_multiplier - adjustable multiplier clock
@@ -587,6 +597,7 @@ void clk_hw_unregister_fractional_divider(struct clk_hw *hw);
  * @reg:	register containing the multiplier
  * @shift:	shift to the multiplier bit field
  * @width:	width of the multiplier bit field
+ * @table:	array of value/multiplier pairs, last entry should have mult = 0
  * @lock:	register lock
  *
  * Clock with an adjustable multiplier affecting its output frequency.
@@ -600,6 +611,26 @@ void clk_hw_unregister_fractional_divider(struct clk_hw *hw);
  *	leaving the parent rate unmodified.
  * CLK_MULTIPLIER_ROUND_CLOSEST - Makes the best calculated divider to be
  *	rounded to the closest integer instead of the down one.
+ * CLK_MULTIPLIER_ONE_BASED - by default the muliplier is the value read from
+ *	the register plus one.  If CLK_MULTIPLIER_ONE_BASED is set then the
+ *	multiplier is the raw value read from the register, with the value of
+ *	zero considered invalid, unless CLK_MULTIPLIER_ALLOW_ZERO is set.
+ * CLK_MULTIPLIER_POWER_OF_TWO - clock muliplier is 2 raised to the value
+ *	read from the hardware register
+ * CLK_MULTIPLIER_ALLOW_ZERO - Allow zero mulipliers.  For multipliers which
+ *	have CLK_MULTIPLIER_ONE_BASED set, it is possible to end up with a zero
+ *	muliplier.  Some hardware implementations gracefully handle this case
+ *	and allow a zero muliplier by not modifying their input clock
+ *	(multiply by one / bypass).
+ * CLK_MULTIPLIER_HIWORD_MASK - The multiplier settings are only in lower 16-bit
+ *	of this register, and mask of multiplier bits are in higher 16-bit of
+ *	this register.  While setting the multiplier bits, higher 16-bit should
+ *	also be updated to indicate changing multiplier bits.
+ * CLK_MULTIPLIER_READ_ONLY - The multiplier settings are preconfigured and
+ *	should not be changed by the clock framework.
+ * CLK_MULTIPLIER_MAX_AT_ZERO - For multipliers which are like
+ *	CLK_MULTIPLIER_ONE_BASED except when the value read from the register
+ *	is zero, the multiplier is 2^width of the field.
  */
 struct clk_multiplier {
 	struct clk_hw	hw;
@@ -607,15 +638,46 @@ struct clk_multiplier {
 	u8		shift;
 	u8		width;
 	u8		flags;
+	const struct clk_mult_table	*table;
 	spinlock_t	*lock;
 };
 
 #define to_clk_multiplier(_hw) container_of(_hw, struct clk_multiplier, hw)
 
-#define CLK_MULTIPLIER_ZERO_BYPASS		BIT(0)
+#define CLK_MULTIPLIER_ZERO_BYPASS	BIT(0)
 #define CLK_MULTIPLIER_ROUND_CLOSEST	BIT(1)
+#define CLK_MULTIPLIER_ONE_BASED	BIT(2)
+#define CLK_MULTIPLIER_POWER_OF_TWO	BIT(3)
+#define CLK_MULTIPLIER_ALLOW_ZERO	BIT(4)
+#define CLK_MULTIPLIER_HIWORD_MASK	BIT(5)
+#define CLK_MULTIPLIER_READ_ONLY	BIT(6)
+#define CLK_MULTIPLIER_MAX_MULT_AT_ZERO	BIT(7)
 
 extern const struct clk_ops clk_multiplier_ops;
+extern const struct clk_ops clk_multiplier_ro_ops;
+
+unsigned long multiplier_recalc_rate(struct clk_hw *hw,
+		unsigned long parent_rate, unsigned int val,
+		const struct clk_mult_table *table, unsigned long flags);
+long multiplier_round_rate(struct clk_hw *hw, unsigned long rate,
+		unsigned long *prate, const struct clk_mult_table *table,
+		u8 width, unsigned long flags);
+int multiplier_get_val(unsigned long rate, unsigned long parent_rate,
+		const struct clk_mult_table *table, u8 width,
+		unsigned long flags);
+struct clk *clk_register_multiplier(struct device *dev, const char *name,
+		const char *parent_name, unsigned long flags,
+		void __iomem *reg, u8 shift, u8 width,
+		u8 clk_multiplier_flags, spinlock_t *lock);
+struct clk *clk_register_multiplier_table(struct device *dev, const char *name,
+		const char *parent_name, unsigned long flags,
+		void __iomem *reg, u8 shift, u8 width,
+		u8 clk_multiplier_flags, const struct clk_mult_table *table,
+		spinlock_t *lock);
+void clk_unregister_multiplier(struct clk *clk);
+void of_multiplier_clk_setup(struct device_node *node);
+
+void of_fixed_factor_clk_setup(struct device_node *node);
 
 /***
  * struct clk_composite - aggregate clock of mux, divider and gate clocks

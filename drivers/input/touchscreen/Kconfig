@@ -429,6 +429,15 @@ config TOUCHSCREEN_ELO
 	  To compile this driver as a module, choose M here: the
 	  module will be called elo.
 
+config TOUCHSCREEN_ELO2515_07
+	default y
+	tristate "Elo TouchSystems 2515-07 IntelliTouch+ controller device support (using binary driver)" if EXPERT
+	help
+          Say Y here if you have an Elo touchscreen using the 2515-07
+	  controller, and your platform has a binary user-space driver.
+          This option will build a GPL kernel driver which exports the
+          touch inputs from user space into the kernel.
+
 config TOUCHSCREEN_WACOM_W8001
 	tristate "Wacom W8001 penabled serial touchscreen"
 	select SERIO
@@ -922,9 +931,14 @@ config TOUCHSCREEN_USB_JASTEC
 	bool "JASTEC/DigiTech DTR-02U USB touch controller device support" if EXPERT
 	depends on TOUCHSCREEN_USB_COMPOSITE
 
-config TOUCHSCREEN_USB_ELO
-	default y
+config TOUCHSCREEN_USB_ELO2700
+	default n
 	bool "Elo TouchSystems 2700 IntelliTouch controller device support" if EXPERT
+	depends on TOUCHSCREEN_USB_COMPOSITE
+
+config TOUCHSCREEN_USB_ELO2515_07_NO_BINARY
+	default y
+	bool "Elo TouchSystems 2515-07 IntelliTouch+ controller device support (no binary driver required)" if EXPERT
 	depends on TOUCHSCREEN_USB_COMPOSITE
 
 config TOUCHSCREEN_USB_E2I

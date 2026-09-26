@@ -270,7 +270,10 @@ static struct lock_class_key af_callback_keys[AF_MAX];
 #define _SK_MEM_PACKETS		256
 #define _SK_MEM_OVERHEAD	SKB_TRUESIZE(256)
 #define SK_WMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
-#define SK_RMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+/* Increase SK_RMEM_MAX to allow applications to set larger receive buffers
+ * for e.g. HTTP/HLS streaming. (Previous value was about ~100KB.) */
+/*#define SK_RMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)*/
+#define SK_RMEM_MAX		(300*1024)
 
 /* Run time adjustable parameters. */
 __u32 sysctl_wmem_max __read_mostly = SK_WMEM_MAX;

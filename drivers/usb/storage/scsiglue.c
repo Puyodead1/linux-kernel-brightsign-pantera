@@ -652,8 +652,12 @@ static const struct scsi_host_template usb_stor_host_template = {
 	 * Windows 7 limiting transfers to 128 sectors for both USB2 and USB3
 	 * and Apple Mac OS X 10.11 limiting transfers to 256 sectors for USB2
 	 * and 2048 for USB3 devices.
+	 *
+	 * However, traditionally BrightSign has tweaked the limit to
+	 * 128KiB because the default limit of 120KiB causes
+	 * inefficient USB transfers of 120KiB followed by 8KiB.
 	 */
-	.max_sectors =                  240,
+	.max_sectors =                  256,
 
 	/*
 	 * merge commands... this seems to help performance, but

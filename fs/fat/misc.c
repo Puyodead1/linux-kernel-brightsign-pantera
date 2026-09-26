@@ -6,6 +6,7 @@
  *		 and date_dos2unix for date==0 by Igor Zhbanov(bsg@uniyar.ac.ru)
  */
 
+#include <linux/blkdev.h>
 #include "fat.h"
 
 /*
@@ -29,6 +30,12 @@ void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 		fat_msg(sb, KERN_ERR, "error, %pV", &vaf);
 		va_end(args);
 	}
+
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+	if (sb->s_bdev && sb->s_bdev->bd_disk)
+		genhd_report_error(sb->s_bdev->bd_disk, GENDISK_ERROR_REPORT_SOURCE_FAT_CORRUPT, 0, 0);
+#endif
+
 
 	if (opts->errors == FAT_ERRORS_PANIC)
 		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
@@ -80,12 +87,20 @@ int fat_clusters_flush(struct super_block *sb)
 		       le32_to_cpu(fsinfo->signature1),
 		       le32_to_cpu(fsinfo->signature2),
 		       sbi->fsinfo_sector);
+
+	/* 
+	 * BrightSign:  This update causes additional disk write that may
+	 *              impact our Flash (SD) reliability.  Since no-one
+	 *              should rely on the data, we don't need to update.
+	 */
+#if 0
 	} else {
 		if (sbi->free_clusters != -1)
 			fsinfo->free_clusters = cpu_to_le32(sbi->free_clusters);
 		if (sbi->prev_free != -1)
 			fsinfo->next_cluster = cpu_to_le32(sbi->prev_free);
 		mark_buffer_dirty(bh);
+#endif
 	}
 	brelse(bh);
 

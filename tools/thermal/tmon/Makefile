@@ -18,8 +18,8 @@ STATIC := --static
 endif
 
 TMON_LIBS=-lm -lpthread
-TMON_LIBS += $(shell pkg-config --libs $(STATIC) panelw ncursesw 2> /dev/null || \
-		     pkg-config --libs $(STATIC) panel ncurses 2> /dev/null || \
+TMON_LIBS += $(shell $(PKG_CONFIG) --libs $(STATIC) panelw ncursesw 2> /dev/null || \
+		     $(PKG_CONFIG) --libs $(STATIC) panel ncurses 2> /dev/null || \
 		     echo -lpanel -lncurses)
 
 CFLAGS    += $(shell pkg-config --cflags $(STATIC) panelw ncursesw 2> /dev/null || \

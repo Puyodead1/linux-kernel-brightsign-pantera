@@ -96,6 +96,10 @@ void __weak unxlate_dev_mem_ptr(phys_addr_t phys, void *addr)
 }
 #endif
 
+/* For now on Monaco we don't use the rclog so there's no point in
+ * having it. */
+#define ENABLE_RCLOG 0
+
 /*
  * This funcion reads the *physical* memory. The f_pos points directly to the
  * memory location.
@@ -396,6 +400,43 @@ static int mmap_kmem(struct file *file, struct vm_area_struct *vma)
 	vma->vm_pgoff = pfn;
 	return mmap_mem(file, vma);
 }
+
+#if ENABLE_RCLOG
+#define RCLOG_BUF_SIZE  (64*1024)
+static unsigned char rclog_buf[RCLOG_BUF_SIZE] __attribute__ ((section (".bss_noinit")));
+
+static int mmap_rclog(struct file * file, struct vm_area_struct * vma)
+{
+    vma->vm_pgoff = __pa(&rclog_buf) >> PAGE_SHIFT;
+    return mmap_mem(file, vma);
+}
+
+static loff_t llseek_rclog(struct file * file, loff_t offset, int orig)
+{
+    mutex_lock(&file->f_path.dentry->d_inode->i_mutex);
+    switch (orig) {
+    case 0: break;
+    case 1: offset += file->f_pos; break;
+    case 2: offset += RCLOG_BUF_SIZE; break;
+    default: break;
+    }
+    mutex_unlock(&file->f_path.dentry->d_inode->i_mutex);
+    file->f_pos = offset;
+    return file->f_pos;
+}
+
+ssize_t read_rclog(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+    if (*ppos >= RCLOG_BUF_SIZE)
+        return 0;
+    if (count + *ppos > RCLOG_BUF_SIZE)
+        count = RCLOG_BUF_SIZE - *ppos;
+    if (copy_to_user(buf, rclog_buf + *ppos, count))
+        return -EFAULT;
+    *ppos += count;
+    return count;
+}
+#endif // ENABLE_RCLOG
 
 /*
  * This function reads the *virtual* memory as seen by the kernel.
@@ -771,6 +812,9 @@ static int open_port(struct inode *inode, struct file *filp)
 #define write_iter_zero	write_iter_null
 #define open_mem	open_port
 #define open_kmem	open_mem
+#define open_ltcore	open_mem
+#define open_kstack	open_mem
+#define open_rclog	open_mem
 
 static const struct file_operations __maybe_unused mem_fops = {
 	.llseek		= memory_lseek,
@@ -830,6 +874,38 @@ static const struct file_operations full_fops = {
 	.write		= write_full,
 };
 
+#if defined(CONFIG_ELF_CORE)
+
+extern ssize_t read_ltcore(struct file *file, char __user *buf,
+			   size_t count, loff_t *ppos);
+
+static const struct file_operations ltcore_fops = {
+	.read	= read_ltcore,
+	.open	= open_ltcore,
+};
+#endif
+
+#if ENABLE_RCLOG
+static const struct file_operations rclog_fops = {
+    .llseek = llseek_rclog,
+    .read   = read_rclog,
+    .mmap   = mmap_rclog,
+    .open   = open_rclog,
+};
+#endif // ENABLE_RCLOG
+
+#ifdef __mips__
+
+extern ssize_t read_kstack(struct file *file, char __user *buf,
+				size_t count, loff_t *ppos);
+
+static const struct file_operations kstack_fops = {
+	.read	= read_kstack,
+	.open	= open_kstack,
+};
+
+#endif
+
 static const struct memdev {
 	const char *name;
 	umode_t mode;
@@ -852,6 +928,18 @@ static const struct memdev {
 	 [9] = { "urandom", 0666, &urandom_fops, 0 },
 #ifdef CONFIG_PRINTK
 	[11] = { "kmsg", 0644, &kmsg_fops, 0 },
+#endif
+#if defined(CONFIG_ELF_CORE)
+	[13] = { "ltcore",  0, &ltcore_fops},
+#endif
+#if defined(CONFIG_PRESERVE_PRINTK_OVER_REBOOT)
+	[14] = { "lastkmsg", 0, &lastkmsg_fops},
+#endif
+#ifdef __mips__
+	[15] = { "kstack",  0, &kstack_fops},
+#endif
+#if ENABLE_RCLOG
+	[16] = { "rclog",  0, &rclog_fops},
 #endif
 };
 
@@ -904,6 +992,8 @@ static int __init chr_dev_init(void)
 
 	mem_class->devnode = mem_devnode;
 	for (minor = 1; minor < ARRAY_SIZE(devlist); minor++) {
+		struct device *minor_device;
+
 		if (!devlist[minor].name)
 			continue;
 
@@ -913,8 +1003,19 @@ static int __init chr_dev_init(void)
 		if ((minor == DEVPORT_MINOR) && !arch_has_dev_port())
 			continue;
 
-		device_create(mem_class, NULL, MKDEV(MEM_MAJOR, minor),
-			      NULL, devlist[minor].name);
+		minor_device = device_create(mem_class, NULL, MKDEV(MEM_MAJOR, minor),
+					     NULL, devlist[minor].name);
+
+#if defined(CONFIG_PRESERVE_PRINTK_OVER_REBOOT)
+		if (devlist[minor].fops == &kmsg_fops) {
+			int rc = device_create_file(minor_device, &kmsg_dev_attr_trigger_dump);
+			BUG_ON(rc != 0);
+		}
+		if (devlist[minor].fops == &lastkmsg_fops) {
+			int rc = device_create_file(minor_device, &lastkmsg_dev_attr_trigger_dump);
+			BUG_ON(rc != 0);
+		}
+#endif // CONFIG_PRESERVE_PRINTK_OVER_REBOOT
 	}
 
 	return tty_init();

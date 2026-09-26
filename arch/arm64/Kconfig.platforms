@@ -48,8 +48,13 @@ config ARCH_BERLIN
 
 config ARCH_BRCMSTB
 	bool "Broadcom Set-Top-Box SoCs"
+	select BCM7038_L1_IRQ
 	select BRCMSTB_L2_IRQ
 	select GENERIC_IRQ_CHIP
+	select SOC_BRCMSTB
+	select BRCMSTB
+	select PINCTRL
+	select ARCH_HAS_RESET_CONTROLLER
 	help
 	  This enables support for Broadcom's ARMv8 Set Top Box SoCs
 
@@ -188,6 +193,7 @@ config ARCH_SPRD
 
 config ARCH_THUNDER
 	bool "Cavium Inc. Thunder SoC Family"
+	select ARM64_L1_CACHE_SHIFT_7
 	help
 	  This enables support for Cavium's Thunder Family of SoCs.
 

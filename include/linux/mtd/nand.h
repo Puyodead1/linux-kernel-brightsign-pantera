@@ -824,7 +824,7 @@ struct nand_chip {
 	int (*setup_data_interface)(struct mtd_info *mtd,
 				    const struct nand_data_interface *conf,
 				    bool check_only);
-
+	int (*enable_prefetch)(struct nand_chip *, bool);
 
 	int chip_delay;
 	unsigned int options;
@@ -874,6 +874,8 @@ struct nand_chip {
 	struct nand_bbt_descr *badblock_pattern;
 
 	void *priv;
+
+	int last_page_read;
 };
 
 extern const struct mtd_ooblayout_ops nand_ooblayout_sp_ops;

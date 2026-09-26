@@ -77,6 +77,9 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page, gfp_t flags)
 
 static bool __in_atomic_pool(void *start, size_t size)
 {
+	if (unlikely(!atomic_pool))
+		return false;
+
 	return addr_in_gen_pool(atomic_pool, (unsigned long)start, size);
 }
 
@@ -359,7 +362,7 @@ static int __swiotlb_dma_mapping_error(struct device *hwdev, dma_addr_t addr)
 	return 0;
 }
 
-static struct dma_map_ops swiotlb_dma_ops = {
+struct dma_map_ops swiotlb_dma_ops = {
 	.alloc = __dma_alloc,
 	.free = __dma_free,
 	.mmap = __swiotlb_mmap,
@@ -375,6 +378,7 @@ static struct dma_map_ops swiotlb_dma_ops = {
 	.dma_supported = __swiotlb_dma_supported,
 	.mapping_error = __swiotlb_dma_mapping_error,
 };
+EXPORT_SYMBOL(swiotlb_dma_ops);
 
 static int __init atomic_pool_init(void)
 {

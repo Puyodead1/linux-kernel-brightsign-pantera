@@ -384,6 +384,13 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
 		retv = 0;
 		break;
 
+	case IPV6_RECVNFBRIDGEINFO:
+		if (optlen < sizeof(int))
+			goto e_inval;
+		np->rxopt.bits.rxnfbridgeinfo = valbool;
+		retv = 0;
+		break;
+
 	case IPV6_HOPOPTS:
 	case IPV6_RTHDRDSTOPTS:
 	case IPV6_RTHDR:
@@ -1213,6 +1220,10 @@ static int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 
 	case IPV6_RECVORIGDSTADDR:
 		val = np->rxopt.bits.rxorigdstaddr;
+		break;
+
+	case IPV6_RECVNFBRIDGEINFO:
+		val = np->rxopt.bits.rxnfbridgeinfo;
 		break;
 
 	case IPV6_UNICAST_HOPS:

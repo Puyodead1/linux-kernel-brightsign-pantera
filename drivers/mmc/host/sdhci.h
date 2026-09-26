@@ -425,6 +425,12 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_ACMD23_BROKEN			(1<<14)
 /* Broken Clock divider zero in controller */
 #define SDHCI_QUIRK2_CLOCK_DIV_ZERO_BROKEN		(1<<15)
+/* Controller does not support SDR50 */
+#define SDHCI_QUIRK2_BROKEN_SDR50			(1<<15)
+/* BrightSign addition to delay after switching voltage*/
+#define SDHCI_QUIRK2_SLOW_VOLTAGE_STABILISATION		(1<<16)
+/* BrightSign addition to temporarily disable 1V8 */
+#define SDHCI_QUIRK2_DISABLE_1_8_V			(1<<17)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */
@@ -524,6 +530,10 @@ struct sdhci_host {
 #define SDHCI_TUNING_MODE_1	0
 #define SDHCI_TUNING_MODE_2	1
 #define SDHCI_TUNING_MODE_3	2
+
+	struct device_attribute signal_voltage; /* Current signalling voltage */
+	struct device_attribute signal_voltage_lock; /* Disable voltage switching */
+	struct device_attribute uhs_mode; 	/* Current UHS mode (if UHS active) */
 
 	unsigned long private[0] ____cacheline_aligned;
 };
@@ -689,6 +699,7 @@ void sdhci_set_power_noreg(struct sdhci_host *host, unsigned char mode,
 void sdhci_set_bus_width(struct sdhci_host *host, int width);
 void sdhci_reset(struct sdhci_host *host, u8 mask);
 void sdhci_set_uhs_signaling(struct sdhci_host *host, unsigned timing);
+int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode);
 
 #ifdef CONFIG_PM
 extern int sdhci_suspend_host(struct sdhci_host *host);

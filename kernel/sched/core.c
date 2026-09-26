@@ -3231,6 +3231,12 @@ static noinline void __schedule_bug(struct task_struct *prev)
 
 	dump_stack();
 	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
+
+	if (panic_on_oops) {
+		printk(KERN_EMERG "Fatal exception: panic in 1 second\n");
+		ssleep(1);
+		panic("Schedule while atomic");
+	}
 }
 
 /*
@@ -4087,8 +4093,8 @@ static int __sched_setscheduler(struct task_struct *p,
 	int queue_flags = DEQUEUE_SAVE | DEQUEUE_MOVE;
 	struct rq *rq;
 
-	/* may grab non-irq protected spin_locks */
-	BUG_ON(in_interrupt());
+	/* The pi code expects interrupts enabled */
+	BUG_ON(pi && in_interrupt());
 recheck:
 	/* double check policy once rq lock held */
 	if (policy < 0) {

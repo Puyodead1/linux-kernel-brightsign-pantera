@@ -341,6 +341,13 @@ struct mtd_info {
 
 	/* ECC status information */
 	struct mtd_ecc_stats ecc_stats;
+
+	struct {
+		int blks_read;
+		int blks_prefetched;
+		int prefetch_missed;
+	} nand_stats;
+
 	/* Subpage shift (NAND) */
 	int subpage_sft;
 

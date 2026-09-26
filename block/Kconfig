@@ -118,6 +118,15 @@ source "block/partitions/Kconfig"
 
 endmenu
 
+config BLK_DEV_SYSFS_ERRORS
+	bool "Block layer error reporting via sysfs"
+	default n
+	---help---
+        Errors associated with block devices reported via the error_report
+	node in sysfs, with counts in error_count.  Errors can be from the
+        generic layer, or from filesystems which have had hooks added (at
+	present, this is only for FAT filesystems).
+
 endif # BLOCK
 
 config BLOCK_COMPAT

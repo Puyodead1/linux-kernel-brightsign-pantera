@@ -529,6 +529,19 @@ int fat_alloc_clusters(struct inode *inode, int *cluster, int nr_cluster)
 	err = -ENOSPC;
 
 out:
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+	/* 
+	 * Report errors to the genhd block layer if possible.
+	 * Do this before releasing the super-block lock.
+	 */
+	if (err) {
+		struct block_device *bd = sb->s_bdev;
+		if (bd && bd->bd_disk)
+			genhd_report_error(bd->bd_disk, 
+				GENDISK_ERROR_REPORT_SOURCE_FAT_CLUSTER, 
+				idx_clus ? cluster[0] : 0, err);
+	}
+#endif
 	unlock_fat(sbi);
 	mark_fsinfo_dirty(sb);
 	fatent_brelse(&fatent);

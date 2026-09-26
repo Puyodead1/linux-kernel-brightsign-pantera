@@ -31,6 +31,13 @@ ifneq ($(CONFIG_USB), )
 	obj-$(CONFIG_PCI)	+= pci-quirks.o
 endif
 
+# The order is important here because it controls the order that
+# the drivers will be initialized and we always need to init
+# the drivers in the order XHCI, EHCI and OHCI.
+obj-$(CONFIG_BRCM_USB_XHCI)	+= xhci-brcm.o
+obj-$(CONFIG_BRCM_USB_EHCI)	+= ehci-brcm.o
+obj-$(CONFIG_BRCM_USB_OHCI)	+= ohci-brcm.o
+
 obj-$(CONFIG_USB_EHCI_HCD)	+= ehci-hcd.o
 obj-$(CONFIG_USB_EHCI_PCI)	+= ehci-pci.o
 obj-$(CONFIG_USB_EHCI_HCD_PLATFORM)	+= ehci-platform.o

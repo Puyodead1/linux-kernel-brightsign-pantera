@@ -17,6 +17,9 @@ extern int dump_align(struct coredump_params *cprm, int align);
 extern void dump_truncate(struct coredump_params *cprm);
 #ifdef CONFIG_COREDUMP
 extern void do_coredump(const siginfo_t *siginfo);
+#ifdef CONFIG_ELF_CORE
+extern void ltcore_dump(struct siginfo *, struct pt_regs *regs);
+#endif
 #else
 static inline void do_coredump(const siginfo_t *siginfo) {}
 #endif

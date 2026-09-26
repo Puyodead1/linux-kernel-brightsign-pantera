@@ -542,6 +542,7 @@ bool rtl8821ae_rx_query_desc(struct ieee80211_hw *hw,
 	 * for IEEE80211w frame, and mac80211 sw will help
 	 * to decrypt it
 	 */
+
 	if (status->decrypted) {
 		if ((!_ieee80211_is_robust_mgmt_frame(hdr)) &&
 		    (ieee80211_has_protected(hdr->frame_control)))

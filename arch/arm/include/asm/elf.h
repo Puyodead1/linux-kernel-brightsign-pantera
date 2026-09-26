@@ -11,6 +11,9 @@
 #include <asm/ptrace.h>
 #include <asm/user.h>
 
+// Needed for ltcore
+#define USE_ELF_CORE_DUMP
+
 struct task_struct;
 
 typedef unsigned long elf_greg_t;

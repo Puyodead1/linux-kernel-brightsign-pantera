@@ -15,6 +15,24 @@ if PHYLIB
 config SWPHY
 	bool
 
+config LED_TRIGGER_PHY
+	bool "Support LED triggers for tracking link state"
+	depends on LEDS_TRIGGERS
+	---help---
+	  Adds support for a set of LED trigger events per-PHY.  Link
+	  state change will trigger the events, for consumption by an
+	  LED class driver.  There are triggers for each link speed currently
+	  supported by the PHY and also a one common "link" trigger as a
+	  logical-or of all the link speed ones.
+	  All these triggers are named according to the following pattern:
+	      <mii bus id>:<phy>:<speed>
+
+	  Where speed is in the form:
+		<Speed in megabits>Mbps OR <Speed in gigabits>Gbps OR link
+		for any speed known to the PHY.
+
+comment "MII PHY device drivers"
+
 comment "MDIO bus device drivers"
 
 config MDIO_BCM_IPROC
@@ -164,6 +182,12 @@ config AT803X_PHY
 	---help---
 	  Currently supports the AT8030 and AT8035 model
 
+config BCM531XX_PHY
+	tristate "Drivers for Broadcom BCM531XX switches"
+	---help---
+	  Currently supports the Broadcom BCM53101 and BCM53125 external
+	  switches.
+
 config BCM63XX_PHY
 	tristate "Broadcom 63xx SOCs internal PHY"
 	depends on BCM63XX
@@ -204,7 +228,7 @@ config BROADCOM_PHY
 	select BCM_NET_PHYLIB
 	---help---
 	  Currently supports the BCM5411, BCM5421, BCM5461, BCM54616S, BCM5464,
-	  BCM5481 and BCM5482 PHYs.
+	  BCM5481, BCM54810 and BCM5482 PHYs.
 
 config CICADA_PHY
 	tristate "Cicada PHYs"

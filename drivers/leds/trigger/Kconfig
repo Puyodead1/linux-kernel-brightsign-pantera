@@ -35,7 +35,7 @@ config LEDS_TRIGGER_ONESHOT
 
 config LEDS_TRIGGER_DISK
 	bool "LED Disk Trigger"
-	depends on IDE_GD_ATA || ATA
+	depends on IDE_GD_ATA || ATA || MMC || USB || NVME_CORE
 	depends on LEDS_TRIGGERS
 	help
 	  This allows LEDs to be controlled by disk activity.

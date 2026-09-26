@@ -93,6 +93,7 @@
 
 #define TIOCMIWAIT	0x545C	/* wait for a change on serial input line(s) */
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
+#define TIOCSINVERTED	0x5493 /* Set inverted status for tx and rx (BrightSign) */
 
 /*
  * Some arches already define FIOQSIZE due to a historical

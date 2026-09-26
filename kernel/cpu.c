@@ -942,6 +942,7 @@ static int takedown_cpu(unsigned int cpu)
 
 	hotplug_cpu__broadcast_tick_pull(cpu);
 	/* This actually kills the CPU. */
+	printk(KERN_ERR "__cpu_die on %d\n", cpu);
 	__cpu_die(cpu);
 
 	tick_cleanup_dead_cpu(cpu);
@@ -1220,7 +1221,7 @@ int freeze_secondary_cpus(int primary)
 	 */
 	cpumask_clear(frozen_cpus);
 
-	pr_info("Disabling non-boot CPUs ...\n");
+	pr_err("Disabling non-boot CPUs ...\n");
 	for_each_online_cpu(cpu) {
 		if (cpu == primary)
 			continue;
@@ -1228,7 +1229,10 @@ int freeze_secondary_cpus(int primary)
 		error = _cpu_down(cpu, 1, CPUHP_OFFLINE);
 		trace_suspend_resume(TPS("CPU_OFF"), cpu, false);
 		if (!error)
+		{
+			printk(KERN_ERR "CPU %d frozen\n", cpu);
 			cpumask_set_cpu(cpu, frozen_cpus);
+		}
 		else {
 			pr_err("Error taking CPU%d down: %d\n", cpu, error);
 			break;

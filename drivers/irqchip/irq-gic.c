@@ -1033,6 +1033,21 @@ static int gic_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 	return 0;
 }
 
+static int gic_irq_domain_node_xlate(struct irq_domain *domain,
+				     struct device_node *node,
+				     const u32 *intspec, unsigned int intsize,
+				     unsigned long *hwirq,
+				     unsigned int *type)
+{
+	struct irq_fwspec fwspec = { };
+
+	fwspec.fwnode = &node->fwnode;
+	fwspec.param_count = intsize;
+	memcpy(fwspec.param, intspec, sizeof(u32) * intsize);
+
+	return gic_irq_domain_translate(domain, &fwspec, hwirq, type);
+}
+
 static const struct irq_domain_ops gic_irq_domain_hierarchy_ops = {
 	.translate = gic_irq_domain_translate,
 	.alloc = gic_irq_domain_alloc,
@@ -1042,6 +1057,7 @@ static const struct irq_domain_ops gic_irq_domain_hierarchy_ops = {
 static const struct irq_domain_ops gic_irq_domain_ops = {
 	.map = gic_irq_domain_map,
 	.unmap = gic_irq_domain_unmap,
+	.xlate = gic_irq_domain_node_xlate,
 };
 
 static void gic_init_chip(struct gic_chip_data *gic, struct device *dev,
@@ -1113,7 +1129,14 @@ static int gic_init_bases(struct gic_chip_data *gic, int irq_start,
 		gic_irqs = 1020;
 	gic->gic_irqs = gic_irqs;
 
-	if (handle) {		/* DT/ACPI */
+#ifdef CONFIG_BRCMSTB
+	/* BRCMSTB only: Nexus does not support a non 1:1 + offset mapping of
+	 * L1 interrupts
+	 */
+	if (0) {		/* DT/ACPI */
+#else
+	if (handle) {
+#endif
 		gic->domain = irq_domain_create_linear(handle, gic_irqs,
 						       &gic_irq_domain_hierarchy_ops,
 						       gic);
@@ -1140,7 +1163,7 @@ static int gic_init_bases(struct gic_chip_data *gic, int irq_start,
 			irq_base = irq_start;
 		}
 
-		gic->domain = irq_domain_add_legacy(NULL, gic_irqs, irq_base,
+		gic->domain = irq_domain_add_legacy(to_of_node(handle), gic_irqs, irq_base,
 					hwirq_base, &gic_irq_domain_ops, gic);
 	}
 

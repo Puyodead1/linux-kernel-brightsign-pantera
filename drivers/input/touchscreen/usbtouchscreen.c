@@ -18,6 +18,7 @@
  *  - NEXIO/iNexio
  *  - Elo TouchSystems 2700 IntelliTouch
  *  - EasyTouch USB Dual/Multi touch controller from Data Modul
+ *  - Elo TouchSystems 2515-07 IntelliTouch+ (PID 0126)
  *
  * Copyright (C) 2004-2007 by Daniel Ritz <daniel.ritz@gmx.ch>
  * Copyright (C) by Todd E. Johnson (mtouchusb.c)
@@ -64,8 +65,8 @@ static bool swap_xy;
 module_param(swap_xy, bool, 0644);
 MODULE_PARM_DESC(swap_xy, "If set X and Y axes are swapped.");
 
-static bool hwcalib_xy;
-module_param(hwcalib_xy, bool, 0644);
+static int hwcalib_xy = 1;
+module_param(hwcalib_xy, int, 0644);
 MODULE_PARM_DESC(hwcalib_xy, "If set hw-calibrated X/Y are used if available");
 
 /* device specifc data/functions */
@@ -141,8 +142,9 @@ enum {
 	DEVTYPE_ZYTRONIC,
 	DEVTYPE_TC45USB,
 	DEVTYPE_NEXIO,
-	DEVTYPE_ELO,
+	DEVTYPE_ELO2700,
 	DEVTYPE_ETOUCH,
+	DEVTYPE_ELO2515_07,
 };
 
 #define USB_DEVICE_HID_CLASS(vend, prod) \
@@ -243,14 +245,17 @@ static const struct usb_device_id usbtouch_devices[] = {
 		.driver_info = DEVTYPE_NEXIO},
 #endif
 
-#ifdef CONFIG_TOUCHSCREEN_USB_ELO
-	{USB_DEVICE(0x04e7, 0x0020), .driver_info = DEVTYPE_ELO},
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2700
+	{USB_DEVICE(0x04e7, 0x0020), .driver_info = DEVTYPE_ELO2700},
 #endif
 
 #ifdef CONFIG_TOUCHSCREEN_USB_EASYTOUCH
 	{USB_DEVICE(0x7374, 0x0001), .driver_info = DEVTYPE_ETOUCH},
 #endif
 
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2515_07_NO_BINARY
+	{USB_DEVICE(0x04e7, 0x0126), .driver_info = DEVTYPE_ELO2515_07},
+#endif
 	{}
 };
 
@@ -524,7 +529,7 @@ static int itm_read_data(struct usbtouch_usb *dev, unsigned char *pkt)
 
 	dev->x = ((pkt[0] & 0x1F) << 7) | (pkt[3] & 0x7F);
 	dev->y = ((pkt[1] & 0x1F) << 7) | (pkt[4] & 0x7F);
-	dev->touch = touch;
+	dev->touch = 1;
 
 	return 1;
 }
@@ -576,7 +581,7 @@ static int gunze_read_data(struct usbtouch_usb *dev, unsigned char *pkt)
 
 	dev->x = ((pkt[0] & 0x1F) << 7) | (pkt[2] & 0x7F);
 	dev->y = ((pkt[1] & 0x1F) << 7) | (pkt[3] & 0x7F);
-	dev->touch = pkt[0] & 0x20;
+	dev->touch = (pkt[0] & 0x20) ? 1 : 0;
 
 	return 1;
 }
@@ -1050,17 +1055,44 @@ static int nexio_read_data(struct usbtouch_usb *usbtouch, unsigned char *pkt)
 
 
 /*****************************************************************************
- * ELO part
+ * ELO parts - Intellitouch 2700 & 2515-07 controller
  */
 
-#ifdef CONFIG_TOUCHSCREEN_USB_ELO
-
-static int elo_read_data(struct usbtouch_usb *dev, unsigned char *pkt)
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2700
+static int elo2700_read_data(struct usbtouch_usb *dev, unsigned char *pkt)
 {
 	dev->x = (pkt[3] << 8) | pkt[2];
 	dev->y = (pkt[5] << 8) | pkt[4];
 	dev->touch = pkt[6] > 0;
 	dev->press = pkt[6];
+
+	return 1;
+}
+#endif
+
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2515_07_NO_BINARY
+
+/* Note: this is only for the "2515-07" variant.  (04E7:0126)
+ *       the "2515-00" variant (04E7:0022) is handled by hid-multitouch
+ *       
+ * IMPORTANT: This controller is now handled by Elo's binary user-space driver
+ *            (code retained for use on platforms where we don't have one)
+ */
+static int elo2515_07_get_pkt_len(unsigned char *buf, int len)
+{
+	return buf[0];
+}
+
+static int elo2515_07_read_data(struct usbtouch_usb *dev, unsigned char *pkt)
+{
+	if (pkt[0] == 13) {	/* Length byte */
+		dev->x = 4096 - ((pkt[6] << 8) | pkt[5]);
+		dev->y = (pkt[11] << 8) | pkt[10];
+		dev->touch = 1;
+	} else if (pkt[0] == 5)
+	{
+		dev->touch = 0;
+	}
 
 	return 1;
 }
@@ -1076,15 +1108,28 @@ static void usbtouch_process_multi(struct usbtouch_usb *usbtouch,
 #endif
 
 static struct usbtouch_device_info usbtouch_dev_info[] = {
-#ifdef CONFIG_TOUCHSCREEN_USB_ELO
-	[DEVTYPE_ELO] = {
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2700
+	[DEVTYPE_ELO2700] = {
 		.min_xc		= 0x0,
 		.max_xc		= 0x0fff,
 		.min_yc		= 0x0,
 		.max_yc		= 0x0fff,
 		.max_press	= 0xff,
 		.rept_size	= 8,
-		.read_data	= elo_read_data,
+		.read_data	= elo2700_read_data,
+	},
+#endif
+
+#ifdef CONFIG_TOUCHSCREEN_USB_ELO2515_07_NO_BINARY
+	[DEVTYPE_ELO2515_07] = {
+		.min_xc		= 0x0,
+		.max_xc		= 0x0fff,
+		.min_yc		= 0x0,
+		.max_yc		= 0x0fff,
+		.rept_size	= 16,
+		.process_pkt	= usbtouch_process_multi,
+		.get_pkt_len	= elo2515_07_get_pkt_len,
+		.read_data	= elo2515_07_read_data,
 	},
 #endif
 

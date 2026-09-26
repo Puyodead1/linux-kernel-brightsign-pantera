@@ -211,7 +211,8 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 					kfree_skb(skb);
 					goto out;
 				}
-				nf_reset(skb);
+				// BrightSign: Keep the netfilter data around so we can report it to applications
+				//nf_reset(skb);
 			}
 			ret = ipprot->handler(skb);
 			if (ret < 0) {

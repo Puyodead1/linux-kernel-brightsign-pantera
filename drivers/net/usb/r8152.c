@@ -4439,6 +4439,9 @@ static int rtl8152_probe(struct usb_interface *intf,
 	usb_set_intfdata(intf, tp);
 	netif_napi_add(netdev, &tp->napi, r8152_poll, RTL8152_NAPI_WEIGHT);
 
+	// BrightSign: We want consistent naming for all USB devices, and for them not to be "eth0".
+	strcpy (netdev->name, "usb%d");
+
 	ret = register_netdev(netdev);
 	if (ret != 0) {
 		netif_err(tp, probe, netdev, "couldn't register the device\n");

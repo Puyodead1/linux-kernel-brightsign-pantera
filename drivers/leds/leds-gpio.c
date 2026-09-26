@@ -112,6 +112,8 @@ static int create_gpio_led(const struct gpio_led *template,
 
 	led_dat->cdev.name = template->name;
 	led_dat->cdev.default_trigger = template->default_trigger;
+	led_dat->cdev.blink_delay_on = template->blink_delay_on;
+	led_dat->cdev.blink_delay_off = template->blink_delay_off;
 	led_dat->can_sleep = gpiod_cansleep(led_dat->gpiod);
 	if (!led_dat->can_sleep)
 		led_dat->cdev.brightness_set = gpio_led_set;
@@ -200,6 +202,16 @@ static struct gpio_leds_priv *gpio_leds_create(struct platform_device *pdev)
 			else
 				led.default_state = LEDS_GPIO_DEFSTATE_OFF;
 		}
+
+                {
+                        u32 v;
+                        if (fwnode_property_read_u32 (child, "linux,blink_delay_on", &v))
+                                v = 0;
+                        led.blink_delay_on = v;
+                        if (fwnode_property_read_u32 (child, "linux,blink_delay_off", &v))
+                                v = 0;
+                        led.blink_delay_off = v;
+                }
 
 		if (fwnode_property_present(child, "retain-state-suspended"))
 			led.retain_state_suspended = 1;

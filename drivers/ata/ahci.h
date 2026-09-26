@@ -240,6 +240,7 @@ enum {
 						        error-handling stage) */
 	AHCI_HFLAG_NO_DEVSLP		= (1 << 17), /* no device sleep */
 	AHCI_HFLAG_NO_FBS		= (1 << 18), /* no FBS */
+	AHCI_HFLAG_YES_ALPM		= (1 << 19), /* force ALPM cap on */
 
 #ifdef CONFIG_PCI_MSI
 	AHCI_HFLAG_MULTI_MSI		= (1 << 20), /* per-port MSI(-X) */
@@ -247,6 +248,8 @@ enum {
 	/* compile out MSI infrastructure */
 	AHCI_HFLAG_MULTI_MSI		= 0,
 #endif
+	AHCI_HFLAG_NO_WRITE_TO_RO	= (1 << 21), /* don't write to read
+							only registers */
 	AHCI_HFLAG_WAKE_BEFORE_STOP	= (1 << 22), /* wake before DMA stop */
 
 	/* ap->flags bits */

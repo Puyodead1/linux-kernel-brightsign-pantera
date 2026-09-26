@@ -19,6 +19,7 @@
 
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
+#include <linux/usb/quirks.h>
 #include "usb.h"
 
 static inline const char *plural(int n)
@@ -166,6 +167,10 @@ static int generic_probe(struct usb_device *udev)
 	 */
 	if (udev->authorized == 0)
 		dev_err(&udev->dev, "Device is not authorized for usage\n");
+	else if (udev->quirks & USB_QUIRK_NO_INITIAL_SET_CONFIGURATION)
+	{
+		dev_err(&udev->dev, "Device quirk inhibits initial set configuration request\n");
+	}
 	else {
 		c = usb_choose_configuration(udev);
 		if (c >= 0) {

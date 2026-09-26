@@ -413,6 +413,7 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 	    BIT(NL80211_IFTYPE_MESH_POINT) |
 	    BIT(NL80211_IFTYPE_P2P_CLIENT) |
 	    BIT(NL80211_IFTYPE_P2P_GO);
+
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
 
 	hw->wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
@@ -2123,12 +2124,68 @@ static ssize_t rtl_store_debug_level(struct device *d,
 	return strnlen(buf, count);
 }
 
+static ssize_t rtl_show_debug_components(struct device *d,
+				    struct device_attribute *attr, char *buf)
+{
+	struct ieee80211_hw *hw = dev_get_drvdata(d);
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
+	return sprintf(buf, "0x%08LX\n", rtlpriv->dbg.global_debugcomponents);
+}
+
+static ssize_t rtl_store_debug_components(struct device *d,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct ieee80211_hw *hw = dev_get_drvdata(d);
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	unsigned long val;
+	int ret;
+
+	ret = kstrtoul(buf, 0, &val);
+	if (ret) {
+		RT_TRACE(rtlpriv, COMP_ERR, DBG_DMESG,
+			 "%s is not in hex or decimal form.\n", buf);
+	} else {
+		rtlpriv->dbg.global_debugcomponents = val;
+		RT_TRACE(rtlpriv, COMP_ERR, DBG_DMESG,
+			 "debuglevel:%Lx\n",
+			 rtlpriv->dbg.global_debugcomponents);
+	}
+
+	return strnlen(buf, count);
+}
+
+static ssize_t rtl_show_debug_snr(struct device *d,
+				    struct device_attribute *attr, char *buf)
+{
+	struct ieee80211_hw *hw = dev_get_drvdata(d);
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_phy *rtlphy = &(rtlpriv->phy);
+	u8 rfpath;
+
+	int count = 0;
+	for (rfpath = RF90_PATH_A; rfpath < rtlphy->num_total_rfpath;
+								rfpath++) {
+		count += sprintf(buf + count, "ch[%d]: %ld\n", rfpath,
+					rtlpriv->stats.rx_snr_db[rfpath]);
+	}
+	return count;
+}
+
 static DEVICE_ATTR(debug_level, S_IWUSR | S_IRUGO,
 		   rtl_show_debug_level, rtl_store_debug_level);
+
+static DEVICE_ATTR(debug_components, S_IWUSR | S_IRUGO,
+		   rtl_show_debug_components, rtl_store_debug_components);
+
+static DEVICE_ATTR(debug_snr, S_IRUGO, rtl_show_debug_snr, NULL);
 
 static struct attribute *rtl_sysfs_entries[] = {
 
 	&dev_attr_debug_level.attr,
+	&dev_attr_debug_components.attr,
+	&dev_attr_debug_snr.attr,
 
 	NULL
 };

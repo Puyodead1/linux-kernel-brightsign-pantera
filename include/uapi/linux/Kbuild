@@ -1,5 +1,6 @@
 # UAPI Header export list
 header-y += android/
+header-y += brcmstb/
 header-y += byteorder/
 header-y += can/
 header-y += caif/

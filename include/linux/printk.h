@@ -448,6 +448,9 @@ do {									\
 #endif
 
 extern const struct file_operations kmsg_fops;
+extern struct device_attribute kmsg_dev_attr_trigger_dump;
+extern const struct file_operations lastkmsg_fops;
+extern struct device_attribute lastkmsg_dev_attr_trigger_dump;
 
 enum {
 	DUMP_PREFIX_NONE,

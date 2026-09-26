@@ -115,11 +115,20 @@
 #define TTY_PARANOIA_CHECK 1
 #define CHECK_TTY_COUNT 1
 
+/* If a particularly chatty device is attached to the serial port then
+ * there's a risk that some characters will be ECHOd back to it
+ * between the time that the port is opened and someone gets a chance
+ * to disable echo. Let's avoid that by leaving ECHO out of the
+ * default configuration. Busybox (from at least v1.23.0 due to
+ * d598a8d4) doesn't enable echo if ICANON is set but ECHO is not, so
+ * let's not set ICANON either - this lets init=/bin/sh work
+ * correctly.
+ */
 struct ktermios tty_std_termios = {	/* for the benefit of tty drivers  */
-	.c_iflag = ICRNL | IXON,
+	.c_iflag = ICRNL /*| IXON*/,
 	.c_oflag = OPOST | ONLCR,
 	.c_cflag = B38400 | CS8 | CREAD | HUPCL,
-	.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK |
+	.c_lflag = ISIG /*| ICANON | ECHO*/ | ECHOE | ECHOK |
 		   ECHOCTL | ECHOKE | IEXTEN,
 	.c_cc = INIT_C_CC,
 	.c_ispeed = 38400,

@@ -114,7 +114,7 @@
 #endif
 		.endm
 
-		.section ".start", #alloc, #execinstr
+		.section ".start", "ax"
 /*
  * sort out different calling conventions
  */
@@ -409,6 +409,11 @@ dtb_check_done:
 		 * ourself when the offset is small.
 		 */
 		add	r10, r10, #((reloc_code_end - restart + 256) & ~255)
+
+		/* Bump that value up even higher so we don't risk
+	         * overwriting the .bss_noinit section.
+	         */
+		add	r10, r10, #0x4000000
 		bic	r10, r10, #255
 
 		/* Get start of code we want to copy and align it down. */

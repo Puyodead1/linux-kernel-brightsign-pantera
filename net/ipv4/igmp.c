@@ -132,11 +132,15 @@
 	(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), FORCE_IGMP_VERSION) == 1 || \
 	 IN_DEV_CONF_GET((in_dev), FORCE_IGMP_VERSION) == 1 || \
 	 ((in_dev)->mr_v1_seen && \
+          IPV4_DEVCONF_ALL(dev_net(in_dev->dev), FORCE_IGMP_VERSION) != 3 && \
+          IN_DEV_CONF_GET((in_dev), FORCE_IGMP_VERSION) != 3 && \
 	  time_before(jiffies, (in_dev)->mr_v1_seen)))
 #define IGMP_V2_SEEN(in_dev) \
 	(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), FORCE_IGMP_VERSION) == 2 || \
 	 IN_DEV_CONF_GET((in_dev), FORCE_IGMP_VERSION) == 2 || \
 	 ((in_dev)->mr_v2_seen && \
+          IPV4_DEVCONF_ALL(dev_net(in_dev->dev), FORCE_IGMP_VERSION) != 3 && \
+          IN_DEV_CONF_GET((in_dev), FORCE_IGMP_VERSION) != 3 && \
 	  time_before(jiffies, (in_dev)->mr_v2_seen)))
 
 static int unsolicited_report_interval(struct in_device *in_dev)

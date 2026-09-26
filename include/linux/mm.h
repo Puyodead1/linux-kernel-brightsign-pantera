@@ -777,9 +777,19 @@ static inline void get_page(struct page *page)
 		get_zone_device_page(page);
 }
 
+#ifdef CONFIG_PAGE_AUTOMAP
+void put_automap_page(struct page *page);
+#endif
 static inline void put_page(struct page *page)
 {
 	page = compound_head(page);
+
+#ifdef CONFIG_PAGE_AUTOMAP
+	if (unlikely(PageAutoMap(page))) {
+		put_automap_page(page);
+		return;
+	}
+#endif
 
 	if (put_page_testzero(page))
 		__put_page(page);

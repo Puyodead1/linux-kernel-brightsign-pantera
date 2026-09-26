@@ -588,6 +588,15 @@ void ip6_datagram_recv_common_ctl(struct sock *sk, struct msghdr *msg,
 			put_cmsg(msg, SOL_IPV6, IPV6_PKTINFO,
 				 sizeof(src_info), &src_info);
 	}
+	if (np->rxopt.bits.rxnfbridgeinfo) {
+#ifdef CONFIG_BRIDGE_NETFILTER
+		if (skb->nf_bridge) {
+			struct in6_nfbridgeinfo nfb;
+			nfb.inbi6_physindev = skb->nf_bridge->physindev->ifindex;
+			put_cmsg(msg, SOL_IPV6, IPV6_NFBRIDGEINFO, sizeof(nfb), &nfb);
+		}
+#endif
+	}
 }
 
 void ip6_datagram_recv_specific_ctl(struct sock *sk, struct msghdr *msg,

@@ -156,6 +156,9 @@ static const struct usb_device_id usb_quirk_list[] = {
 	/* Alcor Micro Corp. Hub */
 	{ USB_DEVICE(0x058f, 0x9254), .driver_info = USB_QUIRK_RESET_RESUME },
 
+	/* Bose Soundlink */
+	{ USB_DEVICE(0x05a7, 0x40fa), .driver_info = USB_QUIRK_CHECK_DISCONNECT_DURING_RESET },
+
 	/* appletouch */
 	{ USB_DEVICE(0x05ac, 0x021a), .driver_info = USB_QUIRK_RESET_RESUME },
 
@@ -258,6 +261,9 @@ static const struct usb_device_id usb_quirk_list[] = {
 
 	/* Blackmagic Design UltraStudio SDI */
 	{ USB_DEVICE(0x1edb, 0xbd4f), .driver_info = USB_QUIRK_NO_LPM },
+
+	/* TI AM335x gets stuck in bootloader if sent SET_CONFIGURATION */
+	{ USB_DEVICE(0x0451, 0x6141), .driver_info = USB_QUIRK_NO_INITIAL_SET_CONFIGURATION },
 
 	/* Hauppauge HVR-950q */
 	{ USB_DEVICE(0x2040, 0x7200), .driver_info =

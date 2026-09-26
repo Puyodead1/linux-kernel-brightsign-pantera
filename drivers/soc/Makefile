@@ -3,6 +3,7 @@
 #
 
 obj-y				+= bcm/
+obj-y				+= brightsign/
 obj-$(CONFIG_ARCH_DOVE)		+= dove/
 obj-$(CONFIG_MACH_DOVE)		+= dove/
 obj-y				+= fsl/

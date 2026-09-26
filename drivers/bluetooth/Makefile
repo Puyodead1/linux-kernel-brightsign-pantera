@@ -15,6 +15,15 @@ obj-$(CONFIG_BT_HCIBTUART)	+= btuart_cs.o
 obj-$(CONFIG_BT_HCIBTUSB)	+= btusb.o
 obj-$(CONFIG_BT_HCIBTSDIO)	+= btsdio.o
 
+obj-$(CONFIG_BT_RTKBTUSB)	+= rtk_btusb.o
+rtk_btusb-objs 			:= rtk_bt.o rtk_coex.o
+
+obj-$(CONFIG_BT_RTKBTUSB)	+= rtk_btusb_4139.o
+rtk_btusb_4139-objs 		:= rtk_bt_4139.o rtk_coex_4139.o
+
+obj-$(CONFIG_BT_RTKBTUSB)	+= rtk_btusb_8821.o
+rtk_btusb_8821-objs 		:= rtk_bt_8821.o rtk_coex_8821.o rtk_misc_8821.o
+
 obj-$(CONFIG_BT_INTEL)		+= btintel.o
 obj-$(CONFIG_BT_ATH3K)		+= ath3k.o
 obj-$(CONFIG_BT_MRVL)		+= btmrvl.o

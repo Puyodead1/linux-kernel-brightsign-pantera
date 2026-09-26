@@ -228,6 +228,12 @@ static int __init ic_open_devs(void)
 			if (!(dev->flags & IFF_NOARP))
 				able |= IC_RARP;
 			able &= ic_proto_enabled;
+
+			if (strncmp (dev->name, "eth", 3)) {
+				pr_warn("IP-Config: Ignoring non-ethN device %s\n", dev->name);
+				continue;
+			}
+
 			if (ic_proto_enabled && !able)
 				continue;
 			oflags = dev->flags;

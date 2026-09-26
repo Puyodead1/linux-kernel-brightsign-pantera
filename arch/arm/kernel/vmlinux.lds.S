@@ -320,6 +320,12 @@ SECTIONS
 #endif
 
 	BSS_SECTION(0, 0, 0)
+
+	. = ALIGN(PAGE_SIZE);
+	.bss_noinit (NOLOAD) : {
+		*(.bss_noinit)
+	}
+
 	_end = .;
 
 	STABS_DEBUG

@@ -155,6 +155,17 @@ static void ip_cmsg_recv_dstaddr(struct msghdr *msg, struct sk_buff *skb)
 	put_cmsg(msg, SOL_IP, IP_ORIGDSTADDR, sizeof(sin), &sin);
 }
 
+static void ip_cmsg_recv_nfbridge(struct msghdr *msg, struct sk_buff *skb)
+{
+#ifdef CONFIG_BRIDGE_NETFILTER
+	if (skb->nf_bridge) {
+		struct in_nfbridgeinfo nfb;
+		nfb.inbi_physindev = skb->nf_bridge->physindev->ifindex;
+		put_cmsg(msg, SOL_IP, IP_NFBRIDGEINFO, sizeof(nfb), &nfb);
+	}
+#endif
+}
+
 void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb,
 			 int tlen, int offset)
 {
@@ -220,6 +231,9 @@ void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb,
 
 	if (flags & IP_CMSG_CHECKSUM)
 		ip_cmsg_recv_checksum(msg, skb, tlen, offset);
+
+	if (flags & IP_CMSG_NFBRIDGEINFO)
+		ip_cmsg_recv_nfbridge(msg, skb);
 }
 EXPORT_SYMBOL(ip_cmsg_recv_offset);
 
@@ -726,6 +740,12 @@ static int do_ip_setsockopt(struct sock *sk, int level,
 				inet->cmsg_flags &= ~IP_CMSG_CHECKSUM;
 			}
 		}
+		break;
+	case IP_RECVNFBRIDGEINFO:
+		if (val)
+			inet->cmsg_flags |= IP_CMSG_NFBRIDGEINFO;
+		else
+			inet->cmsg_flags &= ~IP_CMSG_NFBRIDGEINFO;
 		break;
 	case IP_TOS:	/* This sets both TOS and Precedence */
 		if (sk->sk_type == SOCK_STREAM) {
@@ -1369,6 +1389,9 @@ static int do_ip_getsockopt(struct sock *sk, int level, int optname,
 		break;
 	case IP_CHECKSUM:
 		val = (inet->cmsg_flags & IP_CMSG_CHECKSUM) != 0;
+		break;
+	case IP_RECVNFBRIDGEINFO:
+		val = (inet->cmsg_flags & IP_CMSG_NFBRIDGEINFO) != 0;
 		break;
 	case IP_TOS:
 		val = inet->tos;

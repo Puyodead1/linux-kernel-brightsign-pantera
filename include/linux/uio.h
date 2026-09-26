@@ -11,6 +11,7 @@
 
 #include <linux/kernel.h>
 #include <uapi/linux/uio.h>
+#include <linux/errno.h>
 
 struct page;
 struct pipe_inode_info;

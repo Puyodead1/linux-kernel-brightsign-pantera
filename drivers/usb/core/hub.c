@@ -36,6 +36,11 @@
 #define USB_VENDOR_GENESYS_LOGIC		0x05e3
 #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
 
+/* BrightSign uses a GENESYS hub in some products */
+#define USB_VENDOR_BRIGHTSIGN			0x2877
+#define USB_DEVICE_BRIGHTSIGN_USB400		0xed04
+#define USB_DEVICE_BRIGHTSIGN_USB700		0xed07
+
 /* Protect struct usb_device->state and ->children members
  * Note: Both are also protected by ->dev.sem, except that ->state can
  * change to USB_STATE_NOTATTACHED even when the semaphore isn't held. */
@@ -2664,6 +2669,7 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 	u16 portstatus;
 	u16 portchange;
 	u32 ext_portstatus = 0;
+	bool disconnect_during_reset = false;
 
 	for (delay_time = 0;
 			delay_time < HUB_RESET_TIMEOUT;
@@ -2682,6 +2688,9 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 					      &portchange);
 		if (ret < 0)
 			return ret;
+
+		if (!(portstatus & USB_PORT_STAT_CONNECTION))
+			disconnect_during_reset = true;
 
 		/*
 		 * The port state is unknown until the reset completes.
@@ -2708,6 +2717,14 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 
 	if (hub_port_warm_reset_required(hub, port1, portstatus))
 		return -ENOTCONN;
+
+	/* Device went away during reset, but may have come back */
+	if ((udev->quirks & USB_QUIRK_CHECK_DISCONNECT_DURING_RESET) &&
+						disconnect_during_reset) {
+		dev_dbg(&hub->ports[port1 - 1]->dev,
+				"disconnect during reset\n");
+		return -ENOTCONN;
+	}
 
 	/* Device went away? */
 	if (!(portstatus & USB_PORT_STAT_CONNECTION))
@@ -5264,6 +5281,20 @@ static const struct usb_device_id hub_id_table[] = {
       .idVendor = USB_VENDOR_GENESYS_LOGIC,
       .bInterfaceClass = USB_CLASS_HUB,
       .driver_info = HUB_QUIRK_CHECK_PORT_AUTOSUSPEND},
+    { .match_flags = USB_DEVICE_ID_MATCH_VENDOR
+			| USB_DEVICE_ID_MATCH_PRODUCT
+			| USB_DEVICE_ID_MATCH_INT_CLASS,
+      .idVendor = USB_VENDOR_BRIGHTSIGN,
+      .idProduct = USB_DEVICE_BRIGHTSIGN_USB400,
+      .bInterfaceClass = USB_CLASS_HUB,
+      .driver_info = HUB_QUIRK_CHECK_PORT_AUTOSUSPEND},
+    { .match_flags = USB_DEVICE_ID_MATCH_VENDOR
+			| USB_DEVICE_ID_MATCH_PRODUCT
+			| USB_DEVICE_ID_MATCH_INT_CLASS,
+      .idVendor = USB_VENDOR_BRIGHTSIGN,
+      .idProduct = USB_DEVICE_BRIGHTSIGN_USB700,
+      .bInterfaceClass = USB_CLASS_HUB,
+      .driver_info = HUB_QUIRK_CHECK_PORT_AUTOSUSPEND},
     { .match_flags = USB_DEVICE_ID_MATCH_DEV_CLASS,
       .bDeviceClass = USB_CLASS_HUB},
     { .match_flags = USB_DEVICE_ID_MATCH_INT_CLASS,
@@ -5507,9 +5538,22 @@ static int usb_reset_and_verify_device(struct usb_device *udev)
 
 	/* Device might have changed firmware (DFU or similar) */
 	if (descriptors_changed(udev, &descriptor, bos)) {
-		dev_info(&udev->dev, "device firmware changed\n");
-		udev->descriptor = descriptor;	/* for disconnect() calls */
-		goto re_enumerate;
+		// JMicron USB-SATA chips sometimes come back with their own VID:PID instead
+		// of the VID:PID of their OEM (e.g. IOmega). In that case carry on
+		// as if the device hasn't changed (because it hasn't!).
+
+#define JMICRON_USB_VID	0x152d
+		if(le16_to_cpu(udev->descriptor.idVendor) == JMICRON_USB_VID)
+		{
+			// JMicron VID, carry on regardless, but log it
+			dev_err(&udev->dev, "JMicron device on USB reset\n");
+		}
+		else
+		{
+			dev_info(&udev->dev, "device firmware changed\n");
+			udev->descriptor = descriptor;	/* for disconnect() calls */
+			goto re_enumerate;
+		}
 	}
 
 	/* Restore the device's previous configuration */

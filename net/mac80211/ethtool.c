@@ -240,3 +240,16 @@ const struct ethtool_ops ieee80211_ethtool_ops = {
 	.get_ethtool_stats = ieee80211_get_stats,
 	.get_sset_count = ieee80211_get_sset_count,
 };
+
+const struct ethtool_ops ieee80211_ethtool_ops_with_ts_info = {
+	.get_drvinfo = cfg80211_get_drvinfo,
+	.get_regs_len = ieee80211_get_regs_len,
+	.get_regs = ieee80211_get_regs,
+	.get_link = ethtool_op_get_link,
+	.get_ringparam = ieee80211_get_ringparam,
+	.set_ringparam = ieee80211_set_ringparam,
+	.get_strings = ieee80211_get_strings,
+	.get_ethtool_stats = ieee80211_get_stats,
+	.get_sset_count = ieee80211_get_sset_count,
+	.get_ts_info = ethtool_op_get_ts_info,
+};

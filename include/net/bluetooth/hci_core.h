@@ -84,6 +84,7 @@ struct discovery_state {
 	u8			(*uuids)[16];
 	unsigned long		scan_start;
 	unsigned long		scan_duration;
+	u8			scan_filter_dup;
 };
 
 struct hci_conn_hash {

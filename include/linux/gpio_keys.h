@@ -32,6 +32,11 @@ struct gpio_keys_button {
 	int value;
 	unsigned int irq;
 	struct gpio_desc *gpiod;
+	bool is_bidirectional;
+	bool is_reset_button;	/* special reset button semantics */
+	bool is_reset_becomes_crash_button; /* special reset button modifying semantics */
+	bool inverted_as_input; /* invert the polarity when treated as input */
+	bool preserve_state;	/* retain current state during initialisation */
 };
 
 /**

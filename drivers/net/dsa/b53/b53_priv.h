@@ -62,6 +62,7 @@ enum {
 	BCM53019_DEVICE_ID = 0x53019,
 	BCM58XX_DEVICE_ID = 0x5800,
 	BCM7445_DEVICE_ID = 0x7445,
+	BCM7278_DEVICE_ID = 0x7278,
 };
 
 #define B53_N_PORTS	9
@@ -70,6 +71,7 @@ enum {
 struct b53_port {
 	u16		vlan_ctl_mask;
 	struct net_device *bridge_dev;
+	u16 		pvid;
 };
 
 struct b53_vlan {
@@ -115,6 +117,8 @@ struct b53_device {
 
 	unsigned int num_vlans;
 	struct b53_vlan *vlans;
+	bool vlan_enabled;
+	bool vlan_filtering_enabled;
 	unsigned int num_ports;
 	struct b53_port *ports;
 };
@@ -179,7 +183,8 @@ static inline int is5301x(struct b53_device *dev)
 static inline int is58xx(struct b53_device *dev)
 {
 	return dev->chip_id == BCM58XX_DEVICE_ID ||
-		dev->chip_id == BCM7445_DEVICE_ID;
+		dev->chip_id == BCM7445_DEVICE_ID ||
+		dev->chip_id == BCM7278_DEVICE_ID;
 }
 
 #define B53_CPU_PORT_25	5
@@ -318,7 +323,7 @@ static inline int b53_write64(struct b53_device *dev, u8 page, u8 reg,
 }
 
 struct b53_arl_entry {
-	u8 port;
+	u16 port;
 	u8 mac[ETH_ALEN];
 	u16 vid;
 	u8 is_valid:1;

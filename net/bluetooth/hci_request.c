@@ -824,7 +824,7 @@ void hci_req_add_le_passive_scan(struct hci_request *req)
 
 	memset(&enable_cp, 0, sizeof(enable_cp));
 	enable_cp.enable = LE_SCAN_ENABLE;
-	enable_cp.filter_dup = LE_SCAN_FILTER_DUP_ENABLE;
+	enable_cp.filter_dup = hdev->discovery.scan_filter_dup;
 	hci_req_add(req, HCI_OP_LE_SET_SCAN_ENABLE, sizeof(enable_cp),
 		    &enable_cp);
 }
@@ -1435,7 +1435,7 @@ int hci_update_random_address(struct hci_request *req, bool require_privacy,
 	 * use an non-resolvable private address. This is useful for active
 	 * scanning and non-connectable advertising.
 	 */
-	if (require_privacy) {
+	if (0 && require_privacy) { // BrightSign: disable privacy - we can always use the public address
 		bdaddr_t nrpa;
 
 		while (true) {
@@ -2038,7 +2038,7 @@ static int active_scan(struct hci_request *req, unsigned long opt)
 
 	memset(&enable_cp, 0, sizeof(enable_cp));
 	enable_cp.enable = LE_SCAN_ENABLE;
-	enable_cp.filter_dup = LE_SCAN_FILTER_DUP_ENABLE;
+	enable_cp.filter_dup = hdev->discovery.scan_filter_dup;
 
 	hci_req_add(req, HCI_OP_LE_SET_SCAN_ENABLE, sizeof(enable_cp),
 		    &enable_cp);

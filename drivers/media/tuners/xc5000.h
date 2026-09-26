@@ -29,6 +29,8 @@ struct i2c_adapter;
 
 #define XC5000A 1
 #define XC5000C 2
+#define XC5200 3
+#define CTC701 4
 
 struct xc5000_config {
 	u8   i2c_address;

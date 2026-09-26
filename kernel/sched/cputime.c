@@ -228,6 +228,7 @@ void account_steal_time(cputime_t cputime)
 
 	cpustat[CPUTIME_STEAL] += cputime_to_nsecs(cputime);
 }
+EXPORT_SYMBOL_GPL(account_steal_time);
 
 /*
  * Account for idle time.

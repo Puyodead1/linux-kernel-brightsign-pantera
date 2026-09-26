@@ -1114,11 +1114,23 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			 * However, hub_wq will ignore the roothub events until
 			 * the roothub is registered.
 			 */
-			writel(temp | PORT_POWER, port_array[wIndex]);
 
-			temp = readl(port_array[wIndex]);
-			xhci_dbg(xhci, "set port power, actual port %d status  = 0x%x\n", wIndex, temp);
-
+			if ((xhci->quirks & XHCI_BRCM_BROKEN_PORT_POWER_FEAT)) {
+				// On BCM7278 we use the hcd in USB2.0 mode and as a result the USB ports status
+				// and control registers that are mapped are the USB2.0 port status and control registers.
+				// Turning the port power bit on and off in those registers only seem to enable and
+				// disable the transceiver power.  The VBus power remains.  However, turning the port
+				// power bit on and off in the USB3.0 port status and control registers yield the expected
+				// result.  It may maybe a silicon bug.  Let's override the choice of registers to be used
+				// in the presence of the quirk to use the USB3.0 PORTSCx registers for controlling the
+				// port power instead.
+				u32 tmp = xhci->usb3_ports[wIndex];
+				writel(tmp | PORT_POWER, xhci->usb3_ports[wIndex]);
+			} else {
+				writel(temp | PORT_POWER, port_array[wIndex]);
+				temp = readl(port_array[wIndex]);
+				xhci_dbg(xhci, "set port power, actual port %d status  = 0x%x\n", wIndex, temp);
+			}
 			spin_unlock_irqrestore(&xhci->lock, flags);
 			temp = usb_acpi_power_manageable(hcd->self.root_hub,
 					wIndex);
@@ -1229,7 +1241,20 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 					port_array[wIndex], temp);
 			break;
 		case USB_PORT_FEAT_POWER:
-			writel(temp & ~PORT_POWER, port_array[wIndex]);
+			if ((xhci->quirks & XHCI_BRCM_BROKEN_PORT_POWER_FEAT)) {
+				// On BCM7278 we use the hcd in USB2.0 mode and as a result the USB ports status
+				// and control registers that are mapped are the USB2.0 port status and control registers.
+				// Turning the port power bit on and off in those registers only seem to enable and
+				// disable the transceiver power.  The VBus power remains.  However, turning the port
+				// power bit on and off in the USB3.0 port status and control registers yield the expected
+				// result.  It may maybe a silicon bug.  Let's override the choice of registers to be used
+				// in the presence of the quirk to use the USB3.0 PORTSCx registers for controlling the
+				// port power instead.
+				u32 tmp = xhci->usb3_ports[wIndex];
+				writel(tmp & ~PORT_POWER, xhci->usb3_ports[wIndex]);
+			} else {
+				writel(temp & ~PORT_POWER, port_array[wIndex]);
+			}
 
 			spin_unlock_irqrestore(&xhci->lock, flags);
 			temp = usb_acpi_power_manageable(hcd->self.root_hub,

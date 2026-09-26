@@ -47,6 +47,9 @@
 #define MODULE_NAME "pinctrl-bcm2835"
 #define BCM2835_NUM_GPIOS 54
 #define BCM2835_NUM_BANKS 2
+#define BCM2835_NUM_IRQS  3
+
+#define BCM7211_NUM_IRQS  4
 
 #define BCM2835_PIN_BITMAP_SZ \
 	DIV_ROUND_UP(BCM2835_NUM_GPIOS, sizeof(unsigned long) * 8)
@@ -65,11 +68,16 @@
 #define GPAFEN0		0x88	/* Pin Async Falling Edge Detect */
 #define GPPUD		0x94	/* Pin Pull-up/down Enable */
 #define GPPUDCLK0	0x98	/* Pin Pull-up/down Enable Clock */
+#define GP_GPIO_PUP_PDN_CNTRL_REG0 0xe4 /* 7211 Pin Pull-up/down select */
 
 #define FSEL_REG(p)		(GPFSEL0 + (((p) / 10) * 4))
 #define FSEL_SHIFT(p)		(((p) % 10) * 3)
 #define GPIO_REG_OFFSET(p)	((p) / 32)
 #define GPIO_REG_SHIFT(p)	((p) % 32)
+
+#define PUD_7211_MASK		0x3
+#define PUD_7211_REG_OFFSET(p)	((p) / 16)
+#define PUD_7211_REG_SHIFT(p)	(((p) % 16) * 2)
 
 enum bcm2835_pinconf_param {
 	/* argument: bcm2835_pinconf_pull */
@@ -82,19 +90,27 @@ enum bcm2835_pinconf_pull {
 	BCM2835_PINCONFIG_PULL_UP,
 };
 
+enum bcm7211_pinconf_pull {
+	BCM7211_PINCONFIG_PULL_NONE,
+	BCM7211_PINCONFIG_PULL_UP,
+	BCM7211_PINCONFIG_PULL_DOWN,
+};
+
 #define BCM2835_PINCONF_PACK(_param_, _arg_) ((_param_) << 16 | (_arg_))
 #define BCM2835_PINCONF_UNPACK_PARAM(_conf_) ((_conf_) >> 16)
 #define BCM2835_PINCONF_UNPACK_ARG(_conf_) ((_conf_) & 0xffff)
 
 struct bcm2835_gpio_irqdata {
 	struct bcm2835_pinctrl *pc;
-	int bank;
+	int irqgroup;
 };
 
 struct bcm2835_pinctrl {
 	struct device *dev;
 	void __iomem *base;
-	int irq[BCM2835_NUM_BANKS];
+	unsigned int num_irqs;
+	int *irq;
+	int *wake_irq;
 
 	/* note: locking assumes each bank will have its own unsigned long */
 	unsigned long enabled_irq_map[BCM2835_NUM_BANKS];
@@ -105,7 +121,7 @@ struct bcm2835_pinctrl {
 	struct gpio_chip gpio_chip;
 	struct pinctrl_gpio_range gpio_range;
 
-	struct bcm2835_gpio_irqdata irq_data[BCM2835_NUM_BANKS];
+	struct bcm2835_gpio_irqdata *irq_data;
 	spinlock_t irq_lock[BCM2835_NUM_BANKS];
 };
 
@@ -391,17 +407,16 @@ static struct gpio_chip bcm2835_gpio_chip = {
 	.can_sleep = false,
 };
 
-static irqreturn_t bcm2835_gpio_irq_handler(int irq, void *dev_id)
+static int bcm2835_gpio_irq_handle_bank(struct bcm2835_pinctrl *pc,
+					unsigned int bank, u32 mask)
 {
-	struct bcm2835_gpio_irqdata *irqdata = dev_id;
-	struct bcm2835_pinctrl *pc = irqdata->pc;
-	int bank = irqdata->bank;
 	unsigned long events;
 	unsigned offset;
 	unsigned gpio;
 	unsigned int type;
 
 	events = bcm2835_gpio_rd(pc, GPEDS0 + bank * 4);
+	events &= mask;
 	events &= pc->enabled_irq_map[bank];
 	for_each_set_bit(offset, &events, 32) {
 		gpio = (32 * bank) + offset;
@@ -409,7 +424,35 @@ static irqreturn_t bcm2835_gpio_irq_handler(int irq, void *dev_id)
 
 		generic_handle_irq(irq_linear_revmap(pc->irq_domain, gpio));
 	}
-	return events ? IRQ_HANDLED : IRQ_NONE;
+
+	return (events != 0);
+}
+
+static irqreturn_t bcm2835_gpio_irq_handler(int irq, void *dev_id)
+{
+	struct bcm2835_gpio_irqdata *irqdata = dev_id;
+	struct bcm2835_pinctrl *pc = irqdata->pc;
+	int handled = 0;
+
+	switch (irqdata->irqgroup) {
+	case 0: /* IRQ0 covers GPIOs 0-27 */
+		handled = bcm2835_gpio_irq_handle_bank(pc, 0, 0x0fffffff);
+		break;
+	case 1: /* IRQ1 covers GPIOs 28-45 */
+		handled = bcm2835_gpio_irq_handle_bank(pc, 0, 0xf0000000) |
+			  bcm2835_gpio_irq_handle_bank(pc, 1, 0x00003fff);
+		break;
+	case 2: /* IRQ2 covers GPIOs 46-53 */
+		handled = bcm2835_gpio_irq_handle_bank(pc, 1, 0x003fc000);
+		break;
+	}
+
+	return handled ? IRQ_HANDLED : IRQ_NONE;
+}
+
+static irqreturn_t bcm2835_gpio_wake_irq_handler(int irq, void *dev_id)
+{
+	return IRQ_HANDLED;
 }
 
 static inline void __bcm2835_gpio_irq_config(struct bcm2835_pinctrl *pc,
@@ -607,6 +650,30 @@ static void bcm2835_gpio_irq_ack(struct irq_data *data)
 	bcm2835_gpio_set_bit(pc, GPEDS0, gpio);
 }
 
+static int bcm2835_gpio_irq_set_wake(struct irq_data *data, unsigned int on)
+{
+	struct bcm2835_pinctrl *pc = irq_data_get_irq_chip_data(data);
+	unsigned gpio = irqd_to_hwirq(data);
+	unsigned int irqgroup;
+	int ret;
+
+	if (gpio <= 27)
+		irqgroup = 0;
+	else if (gpio >= 28 && gpio <= 45)
+		irqgroup = 1;
+	else if (gpio >= 46 && gpio <= 53)
+		irqgroup = 2;
+	else
+		return -EINVAL;
+
+	if (on)
+		ret = enable_irq_wake(pc->wake_irq[irqgroup]);
+	else
+		ret = disable_irq_wake(pc->wake_irq[irqgroup]);
+
+	return ret;
+}
+
 static struct irq_chip bcm2835_gpio_irq_chip = {
 	.name = MODULE_NAME,
 	.irq_enable = bcm2835_gpio_irq_enable,
@@ -615,6 +682,8 @@ static struct irq_chip bcm2835_gpio_irq_chip = {
 	.irq_ack = bcm2835_gpio_irq_ack,
 	.irq_mask = bcm2835_gpio_irq_disable,
 	.irq_unmask = bcm2835_gpio_irq_enable,
+	.irq_set_wake = bcm2835_gpio_irq_set_wake,
+	.flags = IRQCHIP_MASK_ON_SUSPEND,
 };
 
 static int bcm2835_pctl_get_groups_count(struct pinctrl_dev *pctldev)
@@ -934,6 +1003,56 @@ static const struct pinconf_ops bcm2835_pinconf_ops = {
 	.pin_config_set = bcm2835_pinconf_set,
 };
 
+static int bcm7211_pinconf_set(struct pinctrl_dev *pctldev,
+			       unsigned int pin, unsigned long *configs,
+			       unsigned int num_configs)
+{
+	struct bcm2835_pinctrl *pc = pinctrl_dev_get_drvdata(pctldev);
+	enum bcm2835_pinconf_param param;
+	u32 shifter;
+	u32 value;
+	u16 arg;
+	u32 off;
+	int i;
+
+	for (i = 0; i < num_configs; i++) {
+		param = BCM2835_PINCONF_UNPACK_PARAM(configs[i]);
+		if (param != BCM2835_PINCONF_PARAM_PULL)
+			return -EINVAL;
+		arg = BCM2835_PINCONF_UNPACK_ARG(configs[i]);
+
+		/* convert to 7211 value */
+		switch (arg) {
+		case BCM2835_PINCONFIG_PULL_NONE:
+			arg = BCM7211_PINCONFIG_PULL_NONE;
+			break;
+		case BCM2835_PINCONFIG_PULL_DOWN:
+			arg = BCM7211_PINCONFIG_PULL_DOWN;
+			break;
+		case BCM2835_PINCONFIG_PULL_UP:
+			arg = BCM7211_PINCONFIG_PULL_UP;
+			break;
+		}
+
+		off = PUD_7211_REG_OFFSET(pin);
+		shifter = PUD_7211_REG_SHIFT(pin);
+
+		value = bcm2835_gpio_rd(pc,
+					GP_GPIO_PUP_PDN_CNTRL_REG0 + (off * 4));
+		value &= ~(PUD_7211_MASK << shifter);
+		value |= (arg << shifter);
+		bcm2835_gpio_wr(pc, GP_GPIO_PUP_PDN_CNTRL_REG0 + (off * 4),
+				value);
+	} /* for each config */
+
+	return 0;
+}
+
+static const struct pinconf_ops bcm7211_pinconf_ops = {
+	.pin_config_get = bcm2835_pinconf_get,
+	.pin_config_set = bcm7211_pinconf_set,
+};
+
 static struct pinctrl_desc bcm2835_pinctrl_desc = {
 	.name = MODULE_NAME,
 	.pins = bcm2835_gpio_pins,
@@ -949,15 +1068,52 @@ static struct pinctrl_gpio_range bcm2835_pinctrl_gpio_range = {
 	.npins = BCM2835_NUM_GPIOS,
 };
 
+struct bcm2835_pinctrl_of_data {
+	const struct pinconf_ops *pinconf_ops;
+	unsigned int num_irqs;
+};
+
+static const struct bcm2835_pinctrl_of_data bcm2835_pinctrl_of_data = {
+	.pinconf_ops = &bcm2835_pinconf_ops,
+	.num_irqs = BCM2835_NUM_IRQS,
+};
+
+static const struct bcm2835_pinctrl_of_data bcm7211_pinctrl_of_data = {
+	.pinconf_ops = &bcm7211_pinconf_ops,
+	.num_irqs = BCM7211_NUM_IRQS,
+};
+
+static const struct of_device_id bcm2835_pinctrl_match[] = {
+	{
+		.compatible = "brcm,bcm2835-gpio",
+		.data = &bcm2835_pinctrl_of_data,
+	},
+	{
+		.compatible = "brcm,bcm7211-gpio",
+		.data = &bcm7211_pinctrl_of_data,
+	},
+	{}
+};
+MODULE_DEVICE_TABLE(of, bcm2835_pinctrl_match);
+
 static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 {
+	const struct bcm2835_pinctrl_of_data *of_data = NULL;
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct bcm2835_pinctrl *pc;
 	struct resource iomem;
 	int err, i;
+	const struct of_device_id *match;
+
 	BUILD_BUG_ON(ARRAY_SIZE(bcm2835_gpio_pins) != BCM2835_NUM_GPIOS);
 	BUILD_BUG_ON(ARRAY_SIZE(bcm2835_gpio_groups) != BCM2835_NUM_GPIOS);
+
+	match = of_match_node(bcm2835_pinctrl_match, pdev->dev.of_node);
+	if (match) {
+		of_data = (const struct bcm2835_pinctrl_of_data *)match->data;
+		bcm2835_pinctrl_desc.confops = of_data->pinconf_ops;
+	}
 
 	pc = devm_kzalloc(dev, sizeof(*pc), GFP_KERNEL);
 	if (!pc)
@@ -965,6 +1121,21 @@ static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, pc);
 	pc->dev = dev;
+	pc->num_irqs = of_data ? of_data->num_irqs : BCM2835_NUM_IRQS;
+
+	pc->irq = devm_kcalloc(dev, pc->num_irqs, sizeof(int), GFP_KERNEL);
+	if (!pc->irq)
+		return -ENOMEM;
+
+	pc->irq_data = devm_kcalloc(dev, pc->num_irqs,
+				    sizeof(struct bcm2835_gpio_irqdata),
+				    GFP_KERNEL);
+	if (!pc->irq_data)
+		return -ENOMEM;
+
+	pc->wake_irq = devm_kcalloc(dev, pc->num_irqs, sizeof(int), GFP_KERNEL);
+	if (!pc->wake_irq)
+		return -ENOMEM;
 
 	err = of_address_to_resource(np, 0, &iomem);
 	if (err) {
@@ -998,8 +1169,6 @@ static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 	for (i = 0; i < BCM2835_NUM_BANKS; i++) {
 		unsigned long events;
 		unsigned offset;
-		int len;
-		char *name;
 
 		/* clear event detection flags */
 		bcm2835_gpio_wr(pc, GPREN0 + i * 4, 0);
@@ -1014,10 +1183,16 @@ static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 		for_each_set_bit(offset, &events, 32)
 			bcm2835_gpio_wr(pc, GPEDS0 + i * 4, BIT(offset));
 
-		pc->irq[i] = irq_of_parse_and_map(np, i);
-		pc->irq_data[i].pc = pc;
-		pc->irq_data[i].bank = i;
 		spin_lock_init(&pc->irq_lock[i]);
+	}
+
+	for (i = 0; i < pc->num_irqs; i++) {
+		int len;
+		char *name;
+		pc->irq[i] = irq_of_parse_and_map(np, i);
+		pc->wake_irq[i] = irq_of_parse_and_map(np, i + pc->num_irqs);
+		pc->irq_data[i].pc = pc;
+		pc->irq_data[i].irqgroup = i;
 
 		len = strlen(dev_name(pc->dev)) + 16;
 		name = devm_kzalloc(pc->dev, len, GFP_KERNEL);
@@ -1032,6 +1207,14 @@ static int bcm2835_pinctrl_probe(struct platform_device *pdev)
 			dev_err(dev, "unable to request IRQ %d\n", pc->irq[i]);
 			return err;
 		}
+
+		/* These are optional interrupts */
+		err = devm_request_irq(dev, pc->wake_irq[i],
+			bcm2835_gpio_wake_irq_handler, IRQF_SHARED,
+			name, &pc->irq_data[i]);
+		if (err)
+			dev_warn(dev, "unable to request wake IRQ %d\n",
+				 pc->wake_irq[i]);
 	}
 
 	err = gpiochip_add_data(&pc->gpio_chip, pc);
@@ -1062,12 +1245,6 @@ static int bcm2835_pinctrl_remove(struct platform_device *pdev)
 
 	return 0;
 }
-
-static const struct of_device_id bcm2835_pinctrl_match[] = {
-	{ .compatible = "brcm,bcm2835-gpio" },
-	{}
-};
-MODULE_DEVICE_TABLE(of, bcm2835_pinctrl_match);
 
 static struct platform_driver bcm2835_pinctrl_driver = {
 	.probe = bcm2835_pinctrl_probe,

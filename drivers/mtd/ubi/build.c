@@ -900,9 +900,14 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 	 * will die soon and you will lose all your data.
 	 */
 	if (mtd->type == MTD_MLCNANDFLASH) {
+#ifndef CONFIG_BRCMSTB
 		pr_err("ubi: refuse attaching mtd%d - MLC NAND is not supported\n",
 			mtd->index);
 		return -EINVAL;
+#else
+		pr_warn("ubi: attaching mtd%d - MLC NAND is not power-cut safe\n",
+			mtd->index);
+#endif
 	}
 
 	if (ubi_num == UBI_DEV_NUM_AUTO) {

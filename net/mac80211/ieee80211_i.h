@@ -2131,6 +2131,7 @@ void ieee80211_teardown_tdls_peers(struct ieee80211_sub_if_data *sdata);
 void ieee80211_tdls_chsw_work(struct work_struct *wk);
 
 extern const struct ethtool_ops ieee80211_ethtool_ops;
+extern const struct ethtool_ops ieee80211_ethtool_ops_with_ts_info;
 
 #ifdef CONFIG_MAC80211_NOINLINE
 #define debug_noinline noinline

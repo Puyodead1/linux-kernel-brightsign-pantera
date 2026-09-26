@@ -7,7 +7,7 @@
  *
  * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
- * Copyright(c) 2016   Intel Deutschland GmbH
+ * Copyright(c) 2016 - 2017 Intel Deutschland GmbH
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -34,7 +34,7 @@
  *
  * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
- * Copyright(c) 2016   Intel Deutschland GmbH
+ * Copyright(c) 2016 - 2017 Intel Deutschland GmbH
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -83,7 +83,7 @@ void iwl_mvm_set_rekey_data(struct ieee80211_hw *hw,
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
 	struct iwl_mvm_vif *mvmvif = iwl_mvm_vif_from_mac80211(vif);
 
-	if (iwlwifi_mod_params.sw_crypto)
+	if (iwlwifi_mod_params.swcrypto)
 		return;
 
 	mutex_lock(&mvm->mutex);
@@ -91,7 +91,7 @@ void iwl_mvm_set_rekey_data(struct ieee80211_hw *hw,
 	memcpy(mvmvif->rekey_data.kek, data->kek, NL80211_KEK_LEN);
 	memcpy(mvmvif->rekey_data.kck, data->kck, NL80211_KCK_LEN);
 	mvmvif->rekey_data.replay_ctr =
-		cpu_to_le64(be64_to_cpup((__be64 *)&data->replay_ctr));
+		cpu_to_le64(be64_to_cpup((__be64 *)data->replay_ctr));
 	mvmvif->rekey_data.valid = true;
 
 	mutex_unlock(&mvm->mutex);
@@ -664,7 +664,21 @@ static int iwl_mvm_d3_reprogram(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 	int ret, i;
 	struct iwl_binding_cmd binding_cmd = {};
 	struct iwl_time_quota_cmd quota_cmd = {};
+	struct iwl_time_quota_data *quota;
 	u32 status;
+	int size;
+
+	if (fw_has_capa(&mvm->fw->ucode_capa,
+			IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT)) {
+		size = sizeof(binding_cmd);
+		if (mvmvif->phy_ctxt->channel->band == NL80211_BAND_2GHZ ||
+		    !iwl_mvm_is_cdb_supported(mvm))
+			binding_cmd.lmac_id = cpu_to_le32(IWL_LMAC_24G_INDEX);
+		else
+			binding_cmd.lmac_id = cpu_to_le32(IWL_LMAC_5G_INDEX);
+	} else {
+		size = IWL_BINDING_CMD_SIZE_V1;
+	}
 
 	/* add back the PHY */
 	if (WARN_ON(!mvmvif->phy_ctxt))
@@ -711,8 +725,7 @@ static int iwl_mvm_d3_reprogram(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 
 	status = 0;
 	ret = iwl_mvm_send_cmd_pdu_status(mvm, BINDING_CONTEXT_CMD,
-					  sizeof(binding_cmd), &binding_cmd,
-					  &status);
+					  size, &binding_cmd, &status);
 	if (ret) {
 		IWL_ERR(mvm, "Failed to add binding: %d\n", ret);
 		return ret;
@@ -733,17 +746,20 @@ static int iwl_mvm_d3_reprogram(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 		return ret;
 
 	/* and some quota */
-	quota_cmd.quotas[0].id_and_color =
+	quota = iwl_mvm_quota_cmd_get_quota(mvm, &quota_cmd, 0);
+	quota->id_and_color =
 		cpu_to_le32(FW_CMD_ID_AND_COLOR(mvmvif->phy_ctxt->id,
 						mvmvif->phy_ctxt->color));
-	quota_cmd.quotas[0].quota = cpu_to_le32(IWL_MVM_MAX_QUOTA);
-	quota_cmd.quotas[0].max_duration = cpu_to_le32(IWL_MVM_MAX_QUOTA);
+	quota->quota = cpu_to_le32(IWL_MVM_MAX_QUOTA);
+	quota->max_duration = cpu_to_le32(IWL_MVM_MAX_QUOTA);
 
-	for (i = 1; i < MAX_BINDINGS; i++)
-		quota_cmd.quotas[i].id_and_color = cpu_to_le32(FW_CTXT_INVALID);
+	for (i = 1; i < MAX_BINDINGS; i++) {
+		quota = iwl_mvm_quota_cmd_get_quota(mvm, &quota_cmd, i);
+		quota->id_and_color = cpu_to_le32(FW_CTXT_INVALID);
+	}
 
 	ret = iwl_mvm_send_cmd_pdu(mvm, TIME_QUOTA_CMD, 0,
-				   sizeof(quota_cmd), &quota_cmd);
+				   iwl_mvm_quota_cmd_size(mvm), &quota_cmd);
 	if (ret)
 		IWL_ERR(mvm, "Failed to send quota: %d\n", ret);
 
@@ -986,7 +1002,9 @@ int iwl_mvm_wowlan_config_key_params(struct iwl_mvm *mvm,
 			goto out;
 	}
 
-	if (key_data.use_tkip) {
+	if (key_data.use_tkip &&
+	    !fw_has_api(&mvm->fw->ucode_capa,
+			IWL_UCODE_TLV_API_TKIP_MIC_KEYS)) {
 		ret = iwl_mvm_send_cmd_pdu(mvm,
 					   WOWLAN_TKIP_PARAM,
 					   cmd_flags, sizeof(tkip_cmd),
@@ -1040,7 +1058,7 @@ iwl_mvm_wowlan_config(struct iwl_mvm *mvm,
 			return ret;
 	}
 
-	if (!iwlwifi_mod_params.sw_crypto) {
+	if (!iwlwifi_mod_params.swcrypto) {
 		/*
 		 * This needs to be unlocked due to lock ordering
 		 * constraints. Since we're in the suspend path
@@ -1194,7 +1212,7 @@ static int __iwl_mvm_suspend(struct ieee80211_hw *hw,
 
 	mvmvif = iwl_mvm_vif_from_mac80211(vif);
 
-	if (mvmvif->ap_sta_id == IWL_MVM_STATION_COUNT) {
+	if (mvmvif->ap_sta_id == IWL_MVM_INVALID_STA) {
 		/* if we're not associated, this must be netdetect */
 		if (!wowlan->nd_config) {
 			ret = 1;
@@ -1266,8 +1284,8 @@ static int __iwl_mvm_suspend(struct ieee80211_hw *hw,
 
 		if (!unified_image) {
 			iwl_mvm_ref(mvm, IWL_MVM_REF_UCODE_DOWN);
-			if (mvm->restart_fw > 0) {
-				mvm->restart_fw--;
+			if (mvm->fw_restart > 0) {
+				mvm->fw_restart--;
 				ieee80211_restart_hw(mvm->hw);
 			}
 		}
@@ -1741,7 +1759,7 @@ out:
 static struct iwl_wowlan_status *
 iwl_mvm_get_wakeup_status(struct iwl_mvm *mvm, struct ieee80211_vif *vif)
 {
-	u32 base = mvm->error_event_table;
+	u32 base = mvm->error_event_table[0];
 	struct error_table_start {
 		/* cf. struct iwl_error_event_table */
 		u32 valid;
@@ -1779,12 +1797,6 @@ iwl_mvm_get_wakeup_status(struct iwl_mvm *mvm, struct ieee80211_vif *vif)
 	if (ret) {
 		IWL_ERR(mvm, "failed to query status (%d)\n", ret);
 		return ERR_PTR(ret);
-	}
-
-	/* RF-kill already asserted again... */
-	if (!cmd.resp_pkt) {
-		fw_status = ERR_PTR(-ERFKILL);
-		goto out_free_resp;
 	}
 
 	status_size = sizeof(*fw_status);
@@ -1909,12 +1921,6 @@ iwl_mvm_netdetect_query_results(struct iwl_mvm *mvm,
 	if (ret) {
 		IWL_ERR(mvm, "failed to query matched profiles (%d)\n", ret);
 		return ret;
-	}
-
-	/* RF-kill already asserted again... */
-	if (!cmd.resp_pkt) {
-		ret = -ERFKILL;
-		goto out_free_resp;
 	}
 
 	len = iwl_rx_packet_payload_len(cmd.resp_pkt);
@@ -2073,9 +2079,8 @@ static int __iwl_mvm_resume(struct iwl_mvm *mvm, bool test)
 	bool keep = false;
 	bool unified_image = fw_has_capa(&mvm->fw->ucode_capa,
 					 IWL_UCODE_TLV_CAPA_CNSLDTD_D3_D0_IMG);
-
-	u32 flags = CMD_ASYNC | CMD_HIGH_PRIO | CMD_SEND_IN_IDLE |
-				    CMD_WAKE_UP_TRANS;
+	bool d0i3_first = fw_has_capa(&mvm->fw->ucode_capa,
+				      IWL_UCODE_TLV_CAPA_D0I3_END_FIRST);
 
 	mutex_lock(&mvm->mutex);
 
@@ -2096,11 +2101,24 @@ static int __iwl_mvm_resume(struct iwl_mvm *mvm, bool test)
 	/* query SRAM first in case we want event logging */
 	iwl_mvm_read_d3_sram(mvm);
 
+	if (d0i3_first) {
+		ret = iwl_mvm_send_cmd_pdu(mvm, D0I3_END_CMD, 0, 0, NULL);
+		if (ret < 0) {
+			IWL_ERR(mvm, "Failed to send D0I3_END_CMD first (%d)\n",
+				ret);
+			goto err;
+		}
+	}
+
 	/*
 	 * Query the current location and source from the D3 firmware so we
 	 * can play it back when we re-intiailize the D0 firmware
 	 */
 	iwl_mvm_update_changed_regdom(mvm);
+
+	if (!unified_image)
+		/*  Re-configure default SAR profile */
+		iwl_mvm_sar_select_profile(mvm, 1, 1);
 
 	if (mvm->net_detect) {
 		/* If this is a non-unified image, we restart the FW,
@@ -2137,9 +2155,14 @@ out_iterate:
 			iwl_mvm_d3_disconnect_iter, keep ? vif : NULL);
 
 out:
+	/* no need to reset the device in unified images, if successful */
 	if (unified_image && !ret) {
-		ret = iwl_mvm_send_cmd_pdu(mvm, D0I3_END_CMD, flags, 0, NULL);
-		if (!ret) /* D3 ended successfully - no need to reset device */
+		/* nothing else to do if we already sent D0I3_END_CMD */
+		if (d0i3_first)
+			return 0;
+
+		ret = iwl_mvm_send_cmd_pdu(mvm, D0I3_END_CMD, 0, 0, NULL);
+		if (!ret)
 			return 0;
 	}
 
@@ -2148,7 +2171,7 @@ out:
 	 * 1. We are not using a unified image
 	 * 2. We are using a unified image but had an error while exiting D3
 	 */
-	set_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status);
+	set_bit(IWL_MVM_STATUS_HW_RESTART_REQUESTED, &mvm->status);
 	set_bit(IWL_MVM_STATUS_D3_RECONFIG, &mvm->status);
 	/*
 	 * When switching images we return 1, which causes mac80211

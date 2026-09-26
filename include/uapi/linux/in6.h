@@ -283,6 +283,12 @@ struct in6_flowlabel_req {
 #define IPV6_RECVORIGDSTADDR    IPV6_ORIGDSTADDR
 #define IPV6_TRANSPARENT        75
 #define IPV6_UNICAST_IF         76
+#define IPV6_NFBRIDGEINFO	99
+#define IPV6_RECVNFBRIDGEINFO	IPV6_NFBRIDGEINFO
+
+struct in6_nfbridgeinfo {
+	int		inbi6_physindev;
+};
 
 /*
  * Multicast Routing:

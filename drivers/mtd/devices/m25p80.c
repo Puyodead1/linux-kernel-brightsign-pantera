@@ -320,10 +320,47 @@ static const struct of_device_id m25p_of_table[] = {
 };
 MODULE_DEVICE_TABLE(of, m25p_of_table);
 
+#ifdef CONFIG_PM_SLEEP
+static int m25p_suspend(struct device *dev)
+{
+	return 0;
+}
+
+static int m25p_resume(struct device *dev)
+{
+	struct m25p *flash = dev_get_drvdata(dev);
+	struct flash_platform_data	*data;
+	char *flash_name = NULL;
+	enum read_mode mode = SPI_NOR_NORMAL;
+	int ret;
+
+	data = dev_get_platdata(&flash->spi->dev);
+
+	if (data && data->type)
+		flash_name = data->type;
+	else if (!strcmp(flash->spi->modalias, "spi-nor"))
+		flash_name = NULL; /* auto-detect */
+	else
+		flash_name = flash->spi->modalias;
+
+	if (flash->spi->mode & SPI_RX_QUAD)
+		mode = SPI_NOR_QUAD;
+	else if (flash->spi->mode & SPI_RX_DUAL)
+		mode = SPI_NOR_DUAL;
+
+	ret = spi_nor_scan(&flash->spi_nor, flash_name, mode);
+
+	return ret;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(m25p_pm_ops, m25p_suspend, m25p_resume);
+
 static struct spi_driver m25p80_driver = {
 	.driver = {
 		.name	= "m25p80",
 		.of_match_table = m25p_of_table,
+		.pm	= &m25p_pm_ops,
 	},
 	.id_table	= m25p_ids,
 	.probe	= m25p_probe,

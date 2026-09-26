@@ -12,14 +12,14 @@
  * GNU General Public License for more details.
  */
 
-#include <linux/clk.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pm.h>
 #include <linux/watchdog.h>
+#include <linux/clk.h>
+#include <linux/of.h>
+#include <linux/pm.h>
 
 #define WDT_START_1		0xff00
 #define WDT_START_2		0x00ff
@@ -30,34 +30,47 @@
 #define WDT_CMD_REG		0x4
 
 #define WDT_MIN_TIMEOUT		1 /* seconds */
-#define WDT_DEFAULT_TIMEOUT	30 /* seconds */
+#define WDT_DEFAULT_TIMEOUT	150 /* seconds */
 #define WDT_DEFAULT_RATE	27000000
 
 struct bcm7038_watchdog {
-	void __iomem		*base;
+	void __iomem		*reg;
+	struct clk		*wdt_clk;
 	struct watchdog_device	wdd;
-	u32			rate;
-	struct clk		*clk;
+	u32			hz;
 };
 
+/* We need to know who to kick just before generating a crash dump */
+static struct watchdog_device *the_device;
+
 static bool nowayout = WATCHDOG_NOWAYOUT;
+
+static unsigned long bcm7038_wdt_get_rate(struct bcm7038_watchdog *wdt)
+{
+	/* if clock is missing return hz */
+	if (!wdt->wdt_clk)
+		return wdt->hz;
+
+	return clk_get_rate(wdt->wdt_clk);
+
+}
 
 static void bcm7038_wdt_set_timeout_reg(struct watchdog_device *wdog)
 {
 	struct bcm7038_watchdog *wdt = watchdog_get_drvdata(wdog);
 	u32 timeout;
 
-	timeout = wdt->rate * wdog->timeout;
+	timeout = bcm7038_wdt_get_rate(wdt) * wdog->timeout;
 
-	writel(timeout, wdt->base + WDT_TIMEOUT_REG);
+	writel(timeout, wdt->reg + WDT_TIMEOUT_REG);
 }
 
 static int bcm7038_wdt_ping(struct watchdog_device *wdog)
 {
 	struct bcm7038_watchdog *wdt = watchdog_get_drvdata(wdog);
 
-	writel(WDT_START_1, wdt->base + WDT_CMD_REG);
-	writel(WDT_START_2, wdt->base + WDT_CMD_REG);
+	writel(WDT_START_1, wdt->reg + WDT_CMD_REG);
+	writel(WDT_START_2, wdt->reg + WDT_CMD_REG);
 
 	return 0;
 }
@@ -74,15 +87,18 @@ static int bcm7038_wdt_stop(struct watchdog_device *wdog)
 {
 	struct bcm7038_watchdog *wdt = watchdog_get_drvdata(wdog);
 
-	writel(WDT_STOP_1, wdt->base + WDT_CMD_REG);
-	writel(WDT_STOP_2, wdt->base + WDT_CMD_REG);
+	writel(WDT_STOP_1, wdt->reg + WDT_CMD_REG);
+	writel(WDT_STOP_2, wdt->reg + WDT_CMD_REG);
 
 	return 0;
 }
 
 static int bcm7038_wdt_set_timeout(struct watchdog_device *wdog,
-				   unsigned int t)
+					unsigned int t)
 {
+	if (watchdog_timeout_invalid(wdog, t))
+		return -EINVAL;
+
 	/* Can't modify timeout value if watchdog timer is running */
 	bcm7038_wdt_stop(wdog);
 	wdog->timeout = t;
@@ -96,13 +112,13 @@ static unsigned int bcm7038_wdt_get_timeleft(struct watchdog_device *wdog)
 	struct bcm7038_watchdog *wdt = watchdog_get_drvdata(wdog);
 	u32 time_left;
 
-	time_left = readl(wdt->base + WDT_CMD_REG);
+	time_left = readl(wdt->reg + WDT_CMD_REG);
 
-	return time_left / wdt->rate;
+	return time_left / bcm7038_wdt_get_rate(wdt);
 }
 
 static struct watchdog_info bcm7038_wdt_info = {
-	.identity	= "Broadcom BCM7038 Watchdog Timer",
+	.identity	= "Broadcom Watchdog Timer",
 	.options	= WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING |
 				WDIOF_MAGICCLOSE
 };
@@ -118,8 +134,10 @@ static const struct watchdog_ops bcm7038_wdt_ops = {
 static int bcm7038_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
 	struct bcm7038_watchdog *wdt;
 	struct resource *res;
+	unsigned long wdt_rate;
 	int err;
 
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
@@ -129,39 +147,41 @@ static int bcm7038_wdt_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, wdt);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	wdt->base = devm_ioremap_resource(dev, res);
-	if (IS_ERR(wdt->base))
-		return PTR_ERR(wdt->base);
+	wdt->reg = devm_ioremap_resource(dev, res);
+	if (IS_ERR(wdt->reg))
+		return PTR_ERR(wdt->reg);
 
-	wdt->clk = devm_clk_get(dev, NULL);
-	/* If unable to get clock, use default frequency */
-	if (!IS_ERR(wdt->clk)) {
-		clk_prepare_enable(wdt->clk);
-		wdt->rate = clk_get_rate(wdt->clk);
-		/* Prevent divide-by-zero exception */
-		if (!wdt->rate)
-			wdt->rate = WDT_DEFAULT_RATE;
-	} else {
-		wdt->rate = WDT_DEFAULT_RATE;
-		wdt->clk = NULL;
+	wdt->wdt_clk = devm_clk_get(dev, NULL);
+	/* If unable to get clock, set clock to NULL */
+	if (IS_ERR(wdt->wdt_clk)) {
+		wdt->wdt_clk = NULL;
+		err = of_property_read_u32(np, "clock-frequency", &wdt->hz);
+		if (err) {
+			wdt->hz = WDT_DEFAULT_RATE;
+			dev_info(dev, "Using default frequency\n");
+		}
 	}
+
+	clk_prepare_enable(wdt->wdt_clk);
+
+	wdt_rate = bcm7038_wdt_get_rate(wdt);
 
 	wdt->wdd.info		= &bcm7038_wdt_info;
 	wdt->wdd.ops		= &bcm7038_wdt_ops;
 	wdt->wdd.min_timeout	= WDT_MIN_TIMEOUT;
 	wdt->wdd.timeout	= WDT_DEFAULT_TIMEOUT;
-	wdt->wdd.max_timeout	= 0xffffffff / wdt->rate;
+	wdt->wdd.max_timeout	= (0xffffffff / wdt_rate);
 	wdt->wdd.parent		= dev;
 	watchdog_set_drvdata(&wdt->wdd, wdt);
 
 	err = watchdog_register_device(&wdt->wdd);
 	if (err) {
 		dev_err(dev, "Failed to register watchdog device\n");
-		clk_disable_unprepare(wdt->clk);
 		return err;
 	}
 
-	dev_info(dev, "Registered BCM7038 Watchdog\n");
+	dev_info(dev, "Registered Broadcom Watchdog\n");
+	the_device = &wdt->wdd;
 
 	return 0;
 }
@@ -174,7 +194,7 @@ static int bcm7038_wdt_remove(struct platform_device *pdev)
 		bcm7038_wdt_stop(&wdt->wdd);
 
 	watchdog_unregister_device(&wdt->wdd);
-	clk_disable_unprepare(wdt->clk);
+	clk_disable_unprepare(wdt->wdt_clk);
 
 	return 0;
 }
@@ -183,7 +203,6 @@ static int bcm7038_wdt_remove(struct platform_device *pdev)
 static int bcm7038_wdt_suspend(struct device *dev)
 {
 	struct bcm7038_watchdog *wdt = dev_get_drvdata(dev);
-
 	if (watchdog_active(&wdt->wdd))
 		return bcm7038_wdt_stop(&wdt->wdd);
 
@@ -193,7 +212,6 @@ static int bcm7038_wdt_suspend(struct device *dev)
 static int bcm7038_wdt_resume(struct device *dev)
 {
 	struct bcm7038_watchdog *wdt = dev_get_drvdata(dev);
-
 	if (watchdog_active(&wdt->wdd))
 		return bcm7038_wdt_start(&wdt->wdd);
 
@@ -202,14 +220,30 @@ static int bcm7038_wdt_resume(struct device *dev)
 #endif
 
 static SIMPLE_DEV_PM_OPS(bcm7038_wdt_pm_ops, bcm7038_wdt_suspend,
-			 bcm7038_wdt_resume);
+				bcm7038_wdt_resume);
 
 static void bcm7038_wdt_shutdown(struct platform_device *pdev)
 {
+#if 0
+	// BrightSign never wants to stop the watchdog on shutdown in
+	// case we hang during the shutdown process.
 	struct bcm7038_watchdog *wdt = platform_get_drvdata(pdev);
-
 	if (watchdog_active(&wdt->wdd))
 		bcm7038_wdt_stop(&wdt->wdd);
+#endif
+}
+
+/* Called prior to starting a crash dump to make sure that we don't
+ * watchdog reboot in the middle of it. */
+void bs_watchdog_postpone(int timeout)
+{
+	if (the_device && (the_device->status & (1<<WDOG_ACTIVE))) {
+		pr_info("Postponing watchdog before crash dump\n");
+
+		/* This is enough to set the timeout _and_ ping the
+		 * watchdog. */
+		the_device->ops->set_timeout(the_device, timeout);
+	}
 }
 
 static const struct of_device_id bcm7038_wdt_match[] = {

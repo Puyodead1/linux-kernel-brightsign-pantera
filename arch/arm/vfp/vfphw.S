@@ -69,6 +69,12 @@
 	.endm
 
 
+@ GCC 8.3 puts vfp_kmode_exception into .text.unlikely which
+@ is too far away for bne.w to get there. Luckily, an
+@ unconditional branch has more range.
+vfp_kmode_exception_thunk:
+	b	vfp_kmode_exception	@ Returns through lr
+
 @ VFP hardware support entry point.
 @
 @  r0  = instruction opcode (32-bit ARM or two 16-bit Thumb)
@@ -84,7 +90,7 @@ ENTRY(vfp_support_entry)
 	ldr	r3, [sp, #S_PSR]	@ Neither lazy restore nor FP exceptions
 	and	r3, r3, #MODE_MASK	@ are supported in kernel mode
 	teq	r3, #USR_MODE
-	bne	vfp_kmode_exception	@ Returns through lr
+	bne	vfp_kmode_exception_thunk @ Returns through lr
 
 	VFPFMRX	r1, FPEXC		@ Is the VFP enabled?
 	DBGSTR1	"fpexc %08x", r1

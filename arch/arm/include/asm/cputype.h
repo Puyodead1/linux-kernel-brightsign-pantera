@@ -1,9 +1,6 @@
 #ifndef __ASM_ARM_CPUTYPE_H
 #define __ASM_ARM_CPUTYPE_H
 
-#include <linux/stringify.h>
-#include <linux/kernel.h>
-
 #define CPUID_ID	0
 #define CPUID_CACHETYPE	1
 #define CPUID_TCM	2
@@ -60,7 +57,35 @@
 #define MPIDR_AFFINITY_LEVEL(mpidr, level) \
 	((mpidr >> (MPIDR_LEVEL_BITS * level)) & MPIDR_LEVEL_MASK)
 
+#define MIDR_REVISION_MASK	0xf
+#define MIDR_REVISION(midr)	((midr) & MIDR_REVISION_MASK)
+#define MIDR_PARTNUM_SHIFT	4
+#define MIDR_PARTNUM_MASK	(0xfff << MIDR_PARTNUM_SHIFT)
+#define MIDR_PARTNUM(midr)	\
+	(((midr) & MIDR_PARTNUM_MASK) >> MIDR_PARTNUM_SHIFT)
+#define MIDR_ARCHITECTURE_SHIFT	16
+#define MIDR_ARCHITECTURE_MASK	(0xf << MIDR_ARCHITECTURE_SHIFT)
+#define MIDR_ARCHITECTURE(midr)	\
+	(((midr) & MIDR_ARCHITECTURE_MASK) >> MIDR_ARCHITECTURE_SHIFT)
+#define MIDR_VARIANT_SHIFT	20
+#define MIDR_VARIANT_MASK	(0xf << MIDR_VARIANT_SHIFT)
+#define MIDR_VARIANT(midr)	\
+	(((midr) & MIDR_VARIANT_MASK) >> MIDR_VARIANT_SHIFT)
+#define MIDR_IMPLEMENTOR_SHIFT	24
+#define MIDR_IMPLEMENTOR_MASK	(0xff << MIDR_IMPLEMENTOR_SHIFT)
+#define MIDR_IMPLEMENTOR(midr)	\
+	(((midr) & MIDR_IMPLEMENTOR_MASK) >> MIDR_IMPLEMENTOR_SHIFT)
+
+#define MIDR_CPU_PART(imp, partnum) \
+	(((imp)			<< MIDR_IMPLEMENTOR_SHIFT) | \
+	(0xf			<< MIDR_ARCHITECTURE_SHIFT) | \
+	((partnum)		<< MIDR_PARTNUM_SHIFT))
+#define MIDR_CPU_MODEL_MASK	(MIDR_IMPLEMENTOR_MASK | \
+				 MIDR_PARTNUM_MASK | \
+				 MIDR_ARCHITECTURE_MASK)
+
 #define ARM_CPU_IMP_ARM			0x41
+#define ARM_CPU_IMP_BRCM		0x42
 #define ARM_CPU_IMP_DEC			0x44
 #define ARM_CPU_IMP_INTEL		0x69
 
@@ -76,7 +101,16 @@
 #define ARM_CPU_PART_CORTEX_A12		0x4100c0d0
 #define ARM_CPU_PART_CORTEX_A17		0x4100c0e0
 #define ARM_CPU_PART_CORTEX_A15		0x4100c0f0
+#define ARM_CPU_PART_CORTEX_A53		0x4100d030
+#define ARM_CPU_PART_CORTEX_A57		0x4100d070
+#define ARM_CPU_PART_CORTEX_A72		0x4100d080
+#define ARM_CPU_PART_CORTEX_A73		0x4100d090
+#define ARM_CPU_PART_CORTEX_A75		0x4100d0a0
 #define ARM_CPU_PART_MASK		0xff00fff0
+
+/* Broadcom cores */
+#define ARM_CPU_PART_BRAHMA_B15		0x420000f0
+#define ARM_CPU_PART_BRAHMA_B53		0x42001000
 
 /* DEC implemented cores */
 #define ARM_CPU_PART_SA1100		0x4400a110
@@ -96,6 +130,15 @@
 
 /* Qualcomm implemented cores */
 #define ARM_CPU_PART_SCORPION		0x510002d0
+
+#define BRCM_CPU_PART_BRAHMA_B53	0x100
+
+#define MIDR_BRAHMA_B53 MIDR_CPU_PART(ARM_CPU_IMP_BRCM, BRCM_CPU_PART_BRAHMA_B53)
+
+#ifndef __ASSEMBLY__
+
+#include <linux/stringify.h>
+#include <linux/kernel.h>
 
 extern unsigned int processor_id;
 
@@ -314,5 +357,7 @@ static inline int __attribute_const__ cpuid_feature_extract_field(u32 features,
 
 #define cpuid_feature_extract(reg, field) \
 	cpuid_feature_extract_field(read_cpuid_ext(reg), field)
+
+#endif /* __ASSEMBLY__ */
 
 #endif

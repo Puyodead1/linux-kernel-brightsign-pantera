@@ -883,6 +883,13 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 #endif
 #endif
 
+#ifdef CONFIG_BRIDGE_NETFILTER
+	if (old->nf_bridge) {
+		nf_bridge_get (old->nf_bridge);
+		new->nf_bridge = old->nf_bridge;
+	}
+#endif
+
 }
 
 /*

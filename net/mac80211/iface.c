@@ -1917,7 +1917,14 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 
 		ndev->features |= local->hw.netdev_features;
 
-		netdev_set_default_ethtool_ops(ndev, &ieee80211_ethtool_ops);
+		/* BrightSign: we want to allow timestamping on the main
+		 * WiFi.  Detecting that by name is awkward, but avoids
+		 * a special flag from the driver
+		 */
+		if (strcmp(ndev->name, "wlan0") == 0)
+			netdev_set_default_ethtool_ops(ndev, &ieee80211_ethtool_ops_with_ts_info);
+		else
+			netdev_set_default_ethtool_ops(ndev, &ieee80211_ethtool_ops);
 
 		ret = register_netdevice(ndev);
 		if (ret) {

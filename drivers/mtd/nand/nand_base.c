@@ -2005,11 +2005,28 @@ static int nand_do_read_ops(struct mtd_info *mtd, loff_t from,
 	oob = ops->oobbuf;
 	oob_required = oob ? 1 : 0;
 
+	if (page == (chip->last_page_read + 1))
+		mtd->nand_stats.prefetch_missed++;
+
 	while (1) {
 		unsigned int ecc_failures = mtd->ecc_stats.failed;
 
 		bytes = min(mtd->writesize - col, readlen);
 		aligned = (bytes == mtd->writesize);
+
+		if (chip->enable_prefetch) {
+			bool use_prefetch = (readlen > bytes) ? true : false;
+			if (use_prefetch)
+				mtd->nand_stats.blks_prefetched++;
+			chip->enable_prefetch(chip, use_prefetch);
+		}
+		mtd->nand_stats.blks_read++;
+#if 0
+		if ((mtd->nand_stats.blks_read & 0x3ff) == 0)
+			printk("%s: read %d blocks prefetched %d missed %d\n", mtd->name,
+			       mtd->nand_stats.blks_read, mtd->nand_stats.blks_prefetched,
+			       mtd->nand_stats.prefetch_missed);
+#endif
 
 		if (!aligned)
 			use_bufpoi = 1;
@@ -2027,6 +2044,7 @@ static int nand_do_read_ops(struct mtd_info *mtd, loff_t from,
 						 __func__, buf);
 
 read_retry:
+			chip->last_page_read = page;
 			chip->cmdfunc(mtd, NAND_CMD_READ0, 0x00, page);
 
 			/*
@@ -2137,6 +2155,8 @@ read_retry:
 			chip->select_chip(mtd, chipnr);
 		}
 	}
+	if (chip->enable_prefetch)
+		chip->enable_prefetch(chip, false);
 	chip->select_chip(mtd, -1);
 
 	ops->retlen = ops->len - (size_t) readlen;

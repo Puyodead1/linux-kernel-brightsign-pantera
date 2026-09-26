@@ -3532,6 +3532,15 @@ static int start_discovery_internal(struct sock *sk, struct hci_dev *hdev,
 	else
 		hdev->discovery.limited = false;
 
+	/* Disable the filter to allow duplicates */
+	if (cp->allow_duplicates) {
+		/* This is also a hint that we want continuous scanning */
+		hdev->le_scan_interval = hdev->le_scan_window;
+		hdev->discovery.scan_filter_dup = LE_SCAN_FILTER_DUP_DISABLE;
+	} else {
+		hdev->discovery.scan_filter_dup = LE_SCAN_FILTER_DUP_ENABLE;
+	}
+
 	cmd = mgmt_pending_add(sk, op, hdev, data, len);
 	if (!cmd) {
 		err = -ENOMEM;

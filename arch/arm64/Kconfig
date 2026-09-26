@@ -6,6 +6,7 @@ config ARM64
 	select ACPI_MCFG if ACPI
 	select ACPI_SPCR_TABLE if ACPI
 	select ARCH_CLOCKSOURCE_DATA
+	select ARCH_HAS_DEBUG_VIRTUAL
 	select ARCH_HAS_DEVMEM_IS_ALLOWED
 	select ARCH_HAS_ACPI_TABLE_UPGRADE if ACPI
 	select ARCH_HAS_ELF_RANDOMIZE
@@ -201,6 +202,15 @@ config GENERIC_CALIBRATE_DELAY
 
 config ZONE_DMA
 	def_bool y
+
+config ZONE_MOVABLE
+	def_bool y
+	depends on !NUMA
+	help
+	  The base address of a ZONE_MOVABLE zone can be defined with the
+	  kernel parameter 'movablebase' when this option is enabled. All
+	  memory pages above the movablebase physical address will be
+	  included in the zone.
 
 config HAVE_GENERIC_RCU_GUP
 	def_bool y
@@ -668,7 +678,25 @@ config ARCH_WANT_HUGE_PMD_SHARE
 config ARCH_HAS_CACHE_LINE_SIZE
 	def_bool y
 
+config ARM64_L1_CACHE_SHIFT_7
+	bool
+	help
+	  Setting ARM64 L1 cache line size to 128 bytes.
+
+config ARM64_L1_CACHE_SHIFT
+	int
+	default 7 if ARM64_L1_CACHE_SHIFT_7
+	default 6
+
 source "mm/Kconfig"
+
+config CACHE_B53_RAC
+	bool "Enable the Broadcom Brahma-B53 read-ahead cache controller"
+	depends on ARCH_BRCMSTB
+	default ARCH_BRCMSTB
+	help
+	  This option enables the Broadcom Brahma-B53 read-ahead cache
+	  controller. If disabled, the read-ahead cache remains off.
 
 config SECCOMP
 	bool "Enable seccomp to safely compute untrusted bytecode"
@@ -941,9 +969,25 @@ config ARM64_MODULE_CMODEL_LARGE
 	bool
 
 config ARM64_MODULE_PLTS
-	bool
+	bool "Use PLTs to allow module memory to spill over into vmalloc area"
 	select ARM64_MODULE_CMODEL_LARGE
 	select HAVE_MOD_ARCH_SPECIFIC
+	help
+	  Allocate PLTs when loading modules so that jumps and calls whose
+	  targets are too far away for their relative offsets to be encoded
+	  in the instructions themselves can be bounced via veneers in the
+	  module's PLT. This allows modules to be allocated in the generic
+	  vmalloc area after the dedicated module memory area has been
+	  exhausted. The modules will use slightly more memory, but after
+	  rounding up to page size, the actual memory footprint is usually
+	  the same.
+
+	  When running with address space randomization (KASLR), the module
+	  region itself may be too far away for ordinary relative jumps and
+	  calls, and so in that case, module PLTs are required and cannot be
+	  disabled.
+
+	  Say y if you are getting out of memory errors while loading modules
 
 config RELOCATABLE
 	bool

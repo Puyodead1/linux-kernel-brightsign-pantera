@@ -40,6 +40,9 @@
 #ifdef CONFIG_SPARC
 #include <linux/sunserialcore.h>
 #endif
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+#include <linux/gpio.h>
+#endif
 
 #include <asm/irq.h>
 
@@ -497,6 +500,31 @@ static void univ8250_rsa_support(struct uart_ops *ops)
 #define univ8250_rsa_support(x)		do { } while (0)
 #endif /* CONFIG_SERIAL_8250_RSA */
 
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+static int serial8250_ioctl(struct uart_port *port, unsigned int cmd,
+		 unsigned long arg)
+{
+	struct uart_8250_port *up = up_to_u8250p(port);
+
+	switch (cmd) {
+	case TIOCSINVERTED:
+		if (up->inversion_gpio > 0) {
+			gpio_set_value((unsigned)up->inversion_gpio, up->inversion_gpio_active_low == !arg);
+			return 0;
+		} else {
+			pr_err("No inversion GPIO\n");
+			return -ENOIOCTLCMD;
+		}
+		break;
+	default:
+		if (base_ops->ioctl)
+			return base_ops->ioctl(port, cmd, arg);
+		else
+			return -ENOIOCTLCMD;
+	}
+}
+#endif
+
 static void __init serial8250_isa_init_ports(void)
 {
 	struct uart_8250_port *up;
@@ -535,6 +563,10 @@ static void __init serial8250_isa_init_ports(void)
 	/* chain base port ops to support Remote Supervisor Adapter */
 	univ8250_port_ops = *base_ops;
 	univ8250_rsa_support(&univ8250_port_ops);
+
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+	univ8250_port_ops.ioctl = serial8250_ioctl;
+#endif
 
 	if (share_irqs)
 		irqflag = IRQF_SHARED;
@@ -998,6 +1030,21 @@ int serial8250_register_8250_port(struct uart_8250_port *up)
 		uart->port.rs485	= up->port.rs485;
 		uart->dma		= up->dma;
 
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+		uart->inversion_gpio	= up->inversion_gpio;
+		uart->inversion_gpio_active_low = up->inversion_gpio_active_low;
+		if (uart->inversion_gpio > 0) {
+		        if (gpio_request_one(uart->inversion_gpio, GPIOF_IN, "8250")) {
+				pr_err("8250: unable to claim GPIO%d for serial polarity inversion\n", uart->inversion_gpio);
+				uart->inversion_gpio = -1;
+			}
+			else {
+				pr_info("8250: claimed GPIO %d for serial polarity inversion (active %s)\n", uart->inversion_gpio,
+					uart->inversion_gpio_active_low ? "low" : "high");
+				gpio_direction_output(uart->inversion_gpio, uart->inversion_gpio_active_low);
+			}
+		}
+#endif
 		/* Take tx_loadsz from fifosize if it wasn't set separately */
 		if (uart->port.fifosize && !uart->tx_loadsz)
 			uart->tx_loadsz = uart->port.fifosize;
@@ -1087,6 +1134,10 @@ void serial8250_unregister_port(int line)
 	}
 
 	uart_remove_one_port(&serial8250_reg, &uart->port);
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+	if (uart->inversion_gpio > 0)
+		gpio_free(uart->inversion_gpio);
+#endif
 	if (serial8250_isa_devs) {
 		uart->port.flags &= ~UPF_BOOT_AUTOCONF;
 		if (skip_txen_test)

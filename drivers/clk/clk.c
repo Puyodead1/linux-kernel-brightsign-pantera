@@ -23,6 +23,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/clkdev.h>
+#include <linux/syscore_ops.h>
 
 #include "clk.h"
 
@@ -38,6 +39,7 @@ static int enable_refcnt;
 static HLIST_HEAD(clk_root_list);
 static HLIST_HEAD(clk_orphan_list);
 static LIST_HEAD(clk_notifier_list);
+static HLIST_HEAD(clk_sw_list);
 
 /***    private data structures    ***/
 
@@ -290,9 +292,6 @@ static unsigned long clk_core_get_rate_nolock(struct clk_core *core)
 	if (!core->num_parents)
 		goto out;
 
-	if (!core->parent)
-		ret = 0;
-
 out:
 	return ret;
 }
@@ -468,6 +467,8 @@ EXPORT_SYMBOL_GPL(__clk_mux_determine_rate_closest);
 
 static void clk_core_unprepare(struct clk_core *core)
 {
+	int i;
+
 	lockdep_assert_held(&prepare_lock);
 
 	if (!core)
@@ -490,7 +491,11 @@ static void clk_core_unprepare(struct clk_core *core)
 		core->ops->unprepare(core->hw);
 
 	trace_clk_unprepare_complete(core);
-	clk_core_unprepare(core->parent);
+	if (core->flags & CLK_IS_SW)
+		for (i = 0; i < core->num_parents; i++)
+			clk_core_unprepare(core->parents[i]);
+	else
+		clk_core_unprepare(core->parent);
 }
 
 static void clk_core_unprepare_lock(struct clk_core *core)
@@ -522,7 +527,8 @@ EXPORT_SYMBOL_GPL(clk_unprepare);
 
 static int clk_core_prepare(struct clk_core *core)
 {
-	int ret = 0;
+	int i, j, ret = 0;
+	struct clk_core *parent;
 
 	lockdep_assert_held(&prepare_lock);
 
@@ -530,7 +536,18 @@ static int clk_core_prepare(struct clk_core *core)
 		return 0;
 
 	if (core->prepare_count == 0) {
-		ret = clk_core_prepare(core->parent);
+		if (core->flags & CLK_IS_SW) {
+			for (i = 0; i < core->num_parents; i++) {
+				parent = clk_core_get_parent_by_index(core, i);
+				ret = clk_core_prepare(parent);
+				if (ret) {
+					for (j = i - 1; j >= 0; j--)
+						clk_core_unprepare(core->parents[j]);
+					break;
+				}
+			}
+		} else
+			ret = clk_core_prepare(core->parent);
 		if (ret)
 			return ret;
 
@@ -586,6 +603,8 @@ EXPORT_SYMBOL_GPL(clk_prepare);
 
 static void clk_core_disable(struct clk_core *core)
 {
+	int i;
+
 	lockdep_assert_held(&enable_lock);
 
 	if (!core)
@@ -607,7 +626,11 @@ static void clk_core_disable(struct clk_core *core)
 
 	trace_clk_disable_complete_rcuidle(core);
 
-	clk_core_disable(core->parent);
+	if (core->flags & CLK_IS_SW)
+		for (i = 0; i < core->num_parents; i++)
+			clk_core_disable(core->parents[i]);
+	else
+		clk_core_disable(core->parent);
 }
 
 static void clk_core_disable_lock(struct clk_core *core)
@@ -642,7 +665,8 @@ EXPORT_SYMBOL_GPL(clk_disable);
 
 static int clk_core_enable(struct clk_core *core)
 {
-	int ret = 0;
+	int i, j, ret = 0;
+	struct clk_core *parent;
 
 	lockdep_assert_held(&enable_lock);
 
@@ -653,7 +677,18 @@ static int clk_core_enable(struct clk_core *core)
 		return -ESHUTDOWN;
 
 	if (core->enable_count == 0) {
-		ret = clk_core_enable(core->parent);
+		if (core->flags & CLK_IS_SW) {
+			for (i = 0; i < core->num_parents; i++) {
+				parent = clk_core_get_parent_by_index(core, i);
+				ret = clk_core_enable(parent);
+				if (ret) {
+					for (j = i - 1; j >= 0; j--)
+						clk_core_disable(core->parents[j]);
+					break;
+				}
+			}
+		} else
+			ret = clk_core_enable(core->parent);
 
 		if (ret)
 			return ret;
@@ -804,13 +839,13 @@ static int __init clk_ignore_unused_setup(char *__unused)
 }
 __setup("clk_ignore_unused", clk_ignore_unused_setup);
 
-static int clk_disable_unused(void)
+static void clk_disable_unused(void)
 {
 	struct clk_core *core;
 
 	if (clk_ignore_unused) {
 		pr_warn("clk: Not disabling unused clocks\n");
-		return 0;
+		return;
 	}
 
 	clk_prepare_lock();
@@ -828,10 +863,20 @@ static int clk_disable_unused(void)
 		clk_unprepare_unused_subtree(core);
 
 	clk_prepare_unlock();
+}
 
+static struct syscore_ops disable_unused_ops = {
+	.resume	= clk_disable_unused,
+};
+
+static int clk_init_disable_unused(void)
+{
+	clk_disable_unused();
+	register_syscore_ops(&disable_unused_ops);
 	return 0;
 }
-late_initcall_sync(clk_disable_unused);
+late_initcall_sync(clk_init_disable_unused);
+
 
 static int clk_core_round_rate_nolock(struct clk_core *core,
 				      struct clk_rate_request *req)
@@ -2129,6 +2174,32 @@ static const struct file_operations clk_dump_fops = {
 	.release	= single_release,
 };
 
+/* Only used when (flags & CLK_IS_SW) */
+static int sw_clk_show(struct seq_file *s, void *what)
+{
+	struct clk_core *clk = s->private;
+	int i;
+
+	seq_printf(s, "Parents of %s:\n", clk->name);
+	for (i = 0; i < clk->num_parents; i++)
+		seq_printf(s, "\t%s\n", clk->parents[i]
+			   ? clk->parents[i]->name : "null");
+	return 0;
+}
+
+/* Only used when (flags & CLK_IS_SW) */
+static int sw_clk_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, sw_clk_show, inode->i_private);
+}
+
+static const struct file_operations sw_clk_ops = {
+	.open		= sw_clk_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 {
 	struct dentry *d;
@@ -2183,6 +2254,13 @@ static int clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 	if (core->ops->debug_init) {
 		ret = core->ops->debug_init(core->hw, core->dentry);
 		if (ret)
+			goto err_out;
+	}
+
+	if (core->flags & CLK_IS_SW) {
+		d = debugfs_create_file("parents", S_IFREG | S_IRUGO,
+					core->dentry, core, &sw_clk_ops);
+		if (!d)
 			goto err_out;
 	}
 
@@ -2376,7 +2454,7 @@ static int __clk_core_init(struct clk_core *core)
 				"%s: invalid NULL in %s's .parent_names\n",
 				__func__, core->name);
 
-	core->parent = __clk_init_parent(core);
+	core->parent = (core->flags & CLK_IS_SW) ? NULL : __clk_init_parent(core);
 
 	/*
 	 * Populate core->parent if parent has already been clk_core_init'd. If
@@ -2394,6 +2472,9 @@ static int __clk_core_init(struct clk_core *core)
 		core->orphan = core->parent->orphan;
 	} else if (!core->num_parents) {
 		hlist_add_head(&core->child_node, &clk_root_list);
+		core->orphan = false;
+	} else if (core->flags & CLK_IS_SW) {
+		hlist_add_head(&core->child_node, &clk_sw_list);
 		core->orphan = false;
 	} else {
 		hlist_add_head(&core->child_node, &clk_orphan_list);

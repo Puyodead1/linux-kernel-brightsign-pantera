@@ -570,6 +570,9 @@ int __initdata dt_root_addr_cells;
 int __initdata dt_root_size_cells;
 
 void *initial_boot_params;
+#ifdef CONFIG_BRCMSTB
+EXPORT_SYMBOL(initial_boot_params);
+#endif
 
 #ifdef CONFIG_OF_EARLY_FLATTREE
 
@@ -682,6 +685,37 @@ static int __init __fdt_scan_reserved_mem(unsigned long node, const char *uname,
 	return 0;
 }
 
+#ifdef CONFIG_BRCMSTB
+static void __init relocate_dtb(void)
+{
+	u64 i;
+	phys_addr_t phys_start, phys_end, init_phys;
+	int nid;
+
+	/*
+	 * See if we can move the DTB somewhere below where it is currently.
+	 */
+	for_each_free_mem_range(i, NUMA_NO_NODE, 0, &phys_start, &phys_end, &nid) {
+		u32 dtb_size = of_get_flat_dt_size();
+		void *virt_new_dtb;
+
+		if ((phys_end - phys_start) < dtb_size)
+			continue;
+
+		virt_new_dtb = (void *)__phys_to_virt(phys_start);
+		init_phys = virt_to_phys(initial_boot_params);
+		pr_info("moving dtb from %pa to %pa\n",
+				&init_phys, &phys_start);
+		memmove(virt_new_dtb, initial_boot_params, dtb_size);
+		initial_boot_params = virt_new_dtb;
+
+		return;
+	}
+}
+#else
+static inline void relocate_dtb(void) {}
+#endif
+
 /**
  * early_init_fdt_scan_reserved_mem() - create reserved memory regions
  *
@@ -716,6 +750,8 @@ void __init early_init_fdt_reserve_self(void)
 {
 	if (!initial_boot_params)
 		return;
+
+	relocate_dtb();
 
 	/* Reserve the dtb region */
 	early_init_dt_reserve_memory_arch(__pa(initial_boot_params),
@@ -885,15 +921,20 @@ const void * __init of_flat_dt_match_machine(const void *default_match,
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
-#ifndef __early_init_dt_declare_initrd
 static void __early_init_dt_declare_initrd(unsigned long start,
 					   unsigned long end)
 {
-	initrd_start = (unsigned long)__va(start);
-	initrd_end = (unsigned long)__va(end);
-	initrd_below_start_ok = 1;
+	/* ARM64 would cause a BUG to occur here when CONFIG_DEBUG_VM is
+	 * enabled since __va() is called too early. ARM64 does make use
+	 * of phys_initrd_start/phys_initrd_size so we can skip this
+	 * conversion.
+	 */
+	if (!IS_ENABLED(CONFIG_ARM64)) {
+		initrd_start = (unsigned long)__va(start);
+		initrd_end = (unsigned long)__va(end);
+		initrd_below_start_ok = 1;
+	}
 }
-#endif
 
 /**
  * early_init_dt_check_for_initrd - Decode initrd location from flat tree
@@ -918,6 +959,8 @@ static void __init early_init_dt_check_for_initrd(unsigned long node)
 	end = of_read_number(prop, len/4);
 
 	__early_init_dt_declare_initrd(start, end);
+	phys_initrd_start = start;
+	phys_initrd_size = end - start;
 
 	pr_debug("initrd_start=0x%llx  initrd_end=0x%llx\n",
 		 (unsigned long long)start, (unsigned long long)end);

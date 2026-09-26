@@ -35,6 +35,12 @@
 
 #define raw_smp_processor_id() (current_thread_info()->cpu)
 
+/*
+ * Logical CPU mapping.
+ */
+extern u64 __cpu_logical_map[NR_CPUS];
+#define cpu_logical_map(cpu)    __cpu_logical_map[cpu]
+
 struct seq_file;
 
 /*
@@ -135,6 +141,10 @@ static inline void cpu_panic_kernel(void)
  * This function is used to inhibit features like kexec and hibernate.
  */
 bool cpus_are_stuck_in_kernel(void);
+
+extern int set_ipi_handler(int ipinr, void *handler, char *desc);
+extern int set_ipi_handler_priv(int ipinr, void *handler, char *desc, void *priv);
+extern void clear_ipi_handler(int ipinr);
 
 #endif /* ifndef __ASSEMBLY__ */
 

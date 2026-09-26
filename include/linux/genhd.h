@@ -177,6 +177,30 @@ struct blk_integrity {
 
 #endif	/* CONFIG_BLK_DEV_INTEGRITY */
 
+#define GENDISK_ERROR_REPORT_BUFSIZE	(128)
+
+#define GENDISK_ERROR_REPORT_SOURCE_INTERNAL	(0)
+#define GENDISK_ERROR_REPORT_SOURCE_BLOCK	(1)
+#define GENDISK_ERROR_REPORT_SOURCE_FAT_CLUSTER	(2)
+#define GENDISK_ERROR_REPORT_SOURCE_FAT_CORRUPT	(3)
+
+struct gendisk_error {
+	struct timeval ktv;
+	int source;
+	int error;
+	unsigned long long param;
+};
+
+struct gendisk_error_reports {
+	struct gendisk_error reports[GENDISK_ERROR_REPORT_BUFSIZE];
+	int head;
+	int tail;
+	int total;
+	struct kernfs_node *notify;
+	struct mutex writelock;
+	struct mutex readlock;
+};
+
 struct gendisk {
 	/* major, first_minor and minors are input parameters only,
 	 * don't use directly.  Use disk_devt() and disk_max_parts().
@@ -215,6 +239,10 @@ struct gendisk {
 #endif	/* CONFIG_BLK_DEV_INTEGRITY */
 	int node_id;
 	struct badblocks *bb;
+
+#ifdef  CONFIG_BLK_DEV_SYSFS_ERRORS
+	struct gendisk_error_reports* errors;
+#endif
 };
 
 static inline struct gendisk *part_to_disk(struct hd_struct *part)
@@ -627,6 +655,8 @@ extern void blk_register_region(dev_t devt, unsigned long range,
 			int (*lock)(dev_t, void *),
 			void *data);
 extern void blk_unregister_region(dev_t devt, unsigned long range);
+
+extern void genhd_report_error(struct gendisk *disk, int source, unsigned long long param, int error);
 
 extern ssize_t part_size_show(struct device *dev,
 			      struct device_attribute *attr, char *buf);

@@ -116,6 +116,8 @@ struct mmc_data {
 
 #define MMC_DATA_WRITE	(1 << 8)
 #define MMC_DATA_READ	(1 << 9)
+#define MMC_CMD12_NONE	(1 << 11)
+#define MMC_DISABLE_WIDE (1 << 12)
 
 	unsigned int		bytes_xfered;
 

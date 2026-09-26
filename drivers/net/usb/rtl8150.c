@@ -900,6 +900,9 @@ static int rtl8150_probe(struct usb_interface *intf,
 	netdev->ethtool_ops = &ops;
 	dev->intr_interval = 100;	/* 100ms */
 
+	// BrightSign: We want consistent naming for all USB devices, and for them not to be "eth0".
+	strcpy (netdev->name, "usb%d");
+
 	if (!alloc_all_urbs(dev)) {
 		dev_err(&intf->dev, "out of memory\n");
 		goto out;

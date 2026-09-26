@@ -37,6 +37,7 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
+#include <linux/reboot.h>
 
 #include <asm/param.h>
 #include <asm/uaccess.h>
@@ -44,6 +45,26 @@
 #include <asm/siginfo.h>
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
+
+static int reboot_on_userfault = 1;
+
+static int __init reboot_on_userfault_setup(char *str)
+{
+	reboot_on_userfault = simple_strtoul(str, NULL, 0);
+	return 1;
+}
+
+static int __init bs_debug_setup(char *str)
+{
+	int bs_debug = simple_strtoul(str, NULL, 0);
+	// Suppress reboot if debugger is enabled
+	if (bs_debug)
+		reboot_on_userfault = 0;
+	return 1;
+}
+
+__setup("reboot_on_userfault=", reboot_on_userfault_setup);
+__setup("bs.debug=", bs_debug_setup);
 
 /*
  * SLAB caches for signal bits.
@@ -2300,7 +2321,7 @@ relock:
 		 */
 		current->flags |= PF_SIGNALED;
 
-		if (sig_kernel_coredump(signr)) {
+		if (sig_kernel_coredump(signr) || test_tsk_thread_flag(current, TIF_MEMDIE)) {
 			if (print_fatal_signals)
 				print_fatal_signal(ksig->info.si_signo);
 			proc_coredump_connector(current);
@@ -2312,7 +2333,22 @@ relock:
 			 * first and our do_group_exit call below will use
 			 * that value and ignore the one we pass it.
 			 */
-			do_coredump(&ksig->info);
+			//do_coredump(&ksig->info);
+#if defined(CONFIG_ELF_CORE)
+			ltcore_dump(&ksig->info, signal_pt_regs());
+
+			if (reboot_on_userfault) {
+				if (current->pid == 1) {
+					printk("Requesting reboot via kernel due to fault in init\n");
+					kernel_restart(NULL);
+				} else {
+					printk(KERN_ERR "Requesting reboot via init due to userspace fault\n");
+					kill_cad_pid(SIGTERM, 1);
+				}
+			} else {
+				printk("Not rebooting due to reboot_on_userfault not enabled.\n");
+			}
+#endif // CONFIG_ELF_CORE
 		}
 
 		/*

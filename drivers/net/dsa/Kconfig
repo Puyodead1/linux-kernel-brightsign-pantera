@@ -14,6 +14,7 @@ config NET_DSA_BCM_SF2
 	depends on HAS_IOMEM && NET_DSA
 	select NET_DSA_TAG_BRCM
 	select FIXED_PHY
+	select BCM531XX_PHY
 	select BCM7XXX_PHY
 	select MDIO_BCM_UNIMAC
 	select B53

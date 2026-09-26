@@ -170,6 +170,15 @@ config BT_HCIUART_QCA
 
 	  Say Y here to compile support for QCA protocol.
 
+config BT_RTKBTUSB
+	tristate "Realtek protocol support with WiFi coexistence"
+	depends on BT_HCIUART
+	help
+	  This is the Realtek driver supplied with the RTL8821 and used
+	  for co-existence with that WiFi chipset.
+
+	  Say Y or M here to compile support for Realtek protocol.
+
 config BT_HCIUART_AG6XX
 	bool "Intel AG6XX protocol support"
 	depends on BT_HCIUART

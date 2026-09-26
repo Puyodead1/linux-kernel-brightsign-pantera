@@ -1735,6 +1735,11 @@ static inline int should_follow_link(struct nameidata *nd, struct path *link,
 		return 0;
 	if (!follow)
 		return 0;
+
+	/* BrightSign: check if this fs is mounted with symlinks disabled */
+	if (unlikely(nd->path.mnt->mnt_flags & MNT_NOSYMFOLLOW))
+		return 0;
+
 	/* make sure that d_is_symlink above matches inode */
 	if (nd->flags & LOOKUP_RCU) {
 		if (read_seqcount_retry(&link->dentry->d_seq, seq))

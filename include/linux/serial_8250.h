@@ -112,6 +112,10 @@ struct uart_8250_port {
 						 */
 	unsigned char		probe;
 #define UART_PROBE_RSA	(1 << 0)
+#if defined(CONFIG_SERIAL_8250_POLARITY_INVERSION)
+	int                     inversion_gpio;         /* -1 if there isn't one */
+	int			inversion_gpio_active_low;
+#endif
 
 	/*
 	 * Some bits in registers are cleared on a read, so they must

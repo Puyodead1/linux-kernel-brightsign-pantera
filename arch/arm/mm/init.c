@@ -37,7 +37,33 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#ifdef CONFIG_BRCMSTB_MEMORY_API
+#include <linux/brcmstb/memory_api.h>
+#endif
+
 #include "mm.h"
+
+#ifdef CONFIG_ZONE_MOVABLE
+unsigned long movable_start __initdata;
+/*
+ * Parses command line for movablebase= options
+ */
+static int __init movablebase_setup(char *str)
+{
+	phys_addr_t addr = 0;
+	unsigned long movablebase;
+
+	addr = memparse(str, &str);
+	addr = PAGE_ALIGN(addr);
+
+	movablebase = __phys_to_pfn(addr);
+	if (movablebase && (!movable_start || movable_start > movablebase))
+		movable_start = movablebase;
+
+	return 0;
+}
+early_param("movablebase", movablebase_setup);
+#endif /* CONFIG_ZONE_MOVABLE */
 
 #ifdef CONFIG_CPU_CP15_MMU
 unsigned long __init __clear_cr(unsigned long mask)
@@ -47,9 +73,7 @@ unsigned long __init __clear_cr(unsigned long mask)
 }
 #endif
 
-static phys_addr_t phys_initrd_start __initdata = 0;
-static unsigned long phys_initrd_size __initdata = 0;
-
+#ifdef CONFIG_BLK_DEV_INITRD
 static int __init early_initrd(char *p)
 {
 	phys_addr_t start;
@@ -86,6 +110,7 @@ static int __init parse_tag_initrd2(const struct tag *tag)
 }
 
 __tagtable(ATAG_INITRD2, parse_tag_initrd2);
+#endif
 
 static void __init find_limits(unsigned long *min, unsigned long *max_low,
 			       unsigned long *max_high)
@@ -145,6 +170,14 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 	 */
 	memset(zone_size, 0, sizeof(zone_size));
 
+#ifdef CONFIG_ZONE_MOVABLE
+	if (movable_start) {
+		WARN_ON(max_low > movable_start);
+		zone_size[ZONE_MOVABLE] = max_high - movable_start;
+		max_high = movable_start;
+	}
+#endif
+
 	/*
 	 * The memory size has already been determined.  If we need
 	 * to do anything fancy with the allocation of this memory
@@ -168,6 +201,16 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 			unsigned long low_end = min(end, max_low);
 			zhole_size[0] -= low_end - start;
 		}
+#ifdef CONFIG_ZONE_MOVABLE
+		if (end > max_high) {
+			unsigned long high_start = max(start, max_high);
+			zhole_size[ZONE_MOVABLE] -= end - high_start;
+			if (start < max_high)
+				end = max_high;
+			else
+				continue;
+		}
+#endif
 #ifdef CONFIG_HIGHMEM
 		if (end > max_low) {
 			unsigned long high_start = max(start, max_low);
@@ -230,17 +273,9 @@ phys_addr_t __init arm_memblock_steal(phys_addr_t size, phys_addr_t align)
 void __init arm_memblock_init(const struct machine_desc *mdesc)
 {
 	/* Register the kernel text, kernel data and initrd with memblock. */
-#ifdef CONFIG_XIP_KERNEL
-	memblock_reserve(__pa(_sdata), _end - _sdata);
-#else
-	memblock_reserve(__pa(_stext), _end - _stext);
-#endif
+	memblock_reserve(__pa(KERNEL_START), KERNEL_END - KERNEL_START);
+
 #ifdef CONFIG_BLK_DEV_INITRD
-	/* FDT scan will populate initrd_start */
-	if (initrd_start && !phys_initrd_size) {
-		phys_initrd_start = __virt_to_phys(initrd_start);
-		phys_initrd_size = initrd_end - initrd_start;
-	}
 	initrd_start = initrd_end = 0;
 	if (phys_initrd_size &&
 	    !memblock_is_region_memory(phys_initrd_start, phys_initrd_size)) {
@@ -272,6 +307,10 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 	early_init_fdt_reserve_self();
 	early_init_fdt_scan_reserved_mem();
 
+#ifdef CONFIG_BRCMSTB_MEMORY_API
+	brcmstb_memory_init();
+#endif
+
 	/* reserve memory for DMA contiguous allocations */
 	dma_contiguous_reserve(arm_dma_limit);
 
@@ -281,15 +320,12 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 
 void __init bootmem_init(void)
 {
-	unsigned long min, max_low, max_high;
-
 	memblock_allow_resize();
-	max_low = max_high = 0;
 
-	find_limits(&min, &max_low, &max_high);
+	find_limits(&min_low_pfn, &max_low_pfn, &max_pfn);
 
-	early_memtest((phys_addr_t)min << PAGE_SHIFT,
-		      (phys_addr_t)max_low << PAGE_SHIFT);
+	early_memtest((phys_addr_t)min_low_pfn << PAGE_SHIFT,
+		      (phys_addr_t)max_low_pfn << PAGE_SHIFT);
 
 	/*
 	 * Sparsemem tries to allocate bootmem in memory_present(),
@@ -307,16 +343,7 @@ void __init bootmem_init(void)
 	 * the sparse mem_map arrays initialized by sparse_init()
 	 * for memmap_init_zone(), otherwise all PFNs are invalid.
 	 */
-	zone_sizes_init(min, max_low, max_high);
-
-	/*
-	 * This doesn't seem to be used by the Linux memory manager any
-	 * more, but is used by ll_rw_block.  If we can get rid of it, we
-	 * also get rid of some of the stuff above as well.
-	 */
-	min_low_pfn = min;
-	max_low_pfn = max_low;
-	max_pfn = max_high;
+	zone_sizes_init(min_low_pfn, max_low_pfn, max_pfn);
 }
 
 /*
@@ -698,7 +725,8 @@ static void update_sections_early(struct section_perm perms[], int n)
 		if (t->flags & PF_KTHREAD)
 			continue;
 		for_each_thread(t, s)
-			set_section_perms(perms, n, true, s->mm);
+			if (s->mm)
+				set_section_perms(perms, n, true, s->mm);
 	}
 	read_unlock(&tasklist_lock);
 	set_section_perms(perms, n, true, current->active_mm);

@@ -23,6 +23,9 @@
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <asm/cacheflush.h>
 #include <linux/console.h>
 #include <linux/bug.h>
 
@@ -61,6 +64,57 @@ void __weak panic_smp_self_stop(void)
 	while (1)
 		cpu_relax();
 }
+
+#define PANIC_FLAG_SIGNATURE 0x6e6e7544
+static unsigned int persistent_panic_flag __attribute__ ((section (".bss_noinit")));
+static int previous_panic_flag;
+
+inline void set_panic_flag(void)
+{
+	persistent_panic_flag = PANIC_FLAG_SIGNATURE;
+	force_writeback(&persistent_panic_flag, sizeof (persistent_panic_flag));
+}
+
+static int panic_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%c\n", previous_panic_flag ? '1' : '0');
+	return 0;
+}
+
+static int panic_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, panic_proc_show, NULL);
+}
+
+static const struct file_operations panic_proc_fops = {
+	.owner = THIS_MODULE,
+	.open = panic_proc_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release
+};
+
+static int __init panic_flag_init(void)
+{
+	if (persistent_panic_flag == PANIC_FLAG_SIGNATURE) {
+		previous_panic_flag = 1;
+		pr_err("Reboot due to PANIC\n");
+		persistent_panic_flag = 0;
+	}
+
+	if (!proc_create("panic_flag", 0, NULL, &panic_proc_fops))
+		pr_err("Failed to create /proc/panic_flag\n");
+
+	return 0;
+}
+
+static void __exit panic_flag_exit(void)
+{
+	remove_proc_entry("panic_flag", NULL);
+}
+
+module_init(panic_flag_init);
+module_exit(panic_flag_exit);
 
 /*
  * Stop ourselves in NMI context if another CPU has already panicked. Arch code
@@ -164,6 +218,8 @@ void panic(const char *fmt, ...)
 
 	if (old_cpu != PANIC_CPU_INVALID && old_cpu != this_cpu)
 		panic_smp_self_stop();
+
+	set_panic_flag();
 
 	console_verbose();
 	bust_spinlocks(1);

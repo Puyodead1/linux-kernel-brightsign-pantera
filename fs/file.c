@@ -201,6 +201,52 @@ static int expand_fdtable(struct files_struct *files, unsigned int nr)
 }
 
 /*
+ * Report a list of all the file descriptors open for the current
+ * process provided we've not done so before.
+ */
+static void report_out_of_files(struct files_struct *files)
+{
+	static unsigned long reported;
+	int fd;
+	struct file *file;
+	struct path path;
+
+	pr_err("Process '%s' exceeded file handle limit\n", current ? current->comm : NULL);
+
+	/* If one thread runs out of file descriptors the chances are
+	 * that another one will whilst we're busy writing this lot
+	 * out to serial. So, let's only report once per boot.
+	 */
+	if (test_and_set_bit(0, &reported))
+		return;
+
+	if (files) {
+		for (fd = 0; fd < files_fdtable(files)->max_fds; fd++) {
+			spin_lock(&files->file_lock);
+			file = fcheck_files(files, fd);
+			if (file) {
+				char *pathname;
+				char buf[128];
+				path = file->f_path;
+				path_get(&file->f_path);
+				spin_unlock(&files->file_lock);
+
+				pathname = d_path(&path, buf, sizeof(buf));
+				path_put(&path);
+
+				if (IS_ERR(pathname))
+					pr_err(" %4d -> ERROR %ld\n", fd, (long)pathname);
+				else
+					pr_err(" %4d -> %s\n", fd, pathname);
+			} else
+				spin_unlock(&files->file_lock);
+		}
+	}
+
+	force_sig(SIGABRT, current);
+}
+
+/*
  * Expand files.
  * This function will expand the file structures, if the requested size exceeds
  * the current capacity and there is room for expansion.
@@ -549,6 +595,8 @@ repeat:
 
 out:
 	spin_unlock(&files->file_lock);
+	if (error == -EMFILE)
+		report_out_of_files(files);
 	return error;
 }
 
@@ -883,11 +931,14 @@ int replace_fd(unsigned fd, struct file *file, unsigned flags)
 
 out_unlock:
 	spin_unlock(&files->file_lock);
+	if (err == -EMFILE)
+		report_out_of_files(files);
 	return err;
 }
 
 SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 {
+	int out_of_files = 0;
 	int err = -EBADF;
 	struct file *file;
 	struct files_struct *files = current->files;
@@ -907,8 +958,10 @@ SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 	if (unlikely(!file))
 		goto Ebadf;
 	if (unlikely(err < 0)) {
-		if (err == -EMFILE)
+		if (err == -EMFILE) {
+			out_of_files = 1;
 			goto Ebadf;
+		}
 		goto out_unlock;
 	}
 	return do_dup2(files, file, newfd, flags);
@@ -917,6 +970,8 @@ Ebadf:
 	err = -EBADF;
 out_unlock:
 	spin_unlock(&files->file_lock);
+	if (out_of_files)
+		report_out_of_files(files);
 	return err;
 }
 

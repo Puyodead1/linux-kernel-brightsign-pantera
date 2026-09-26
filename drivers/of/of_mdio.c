@@ -208,6 +208,7 @@ int of_mdiobus_register(struct mii_bus *mdio, struct device_node *np)
 {
 	struct device_node *child;
 	bool scanphys = false;
+	u32 orig_phy_mask;
 	int addr, rc;
 
 	/* Do not continue if the node is disabled */
@@ -216,7 +217,14 @@ int of_mdiobus_register(struct mii_bus *mdio, struct device_node *np)
 
 	/* Mask out all PHYs from auto probing.  Instead the PHYs listed in
 	 * the device tree are populated after the bus has been registered */
+	orig_phy_mask = mdio->phy_mask;
 	mdio->phy_mask = ~0;
+
+	/* If the original phy_mask was all 0xf, we make it zero here in order
+	 * to get child Device Tree nodes to be probed successfully
+	 */
+	if (orig_phy_mask == mdio->phy_mask)
+		orig_phy_mask = 0;
 
 	mdio->dev.of_node = np;
 
@@ -232,6 +240,10 @@ int of_mdiobus_register(struct mii_bus *mdio, struct device_node *np)
 			scanphys = true;
 			continue;
 		}
+
+		/* Honor hints from the mdio bus */
+		if (orig_phy_mask & BIT(addr))
+			continue;
 
 		if (of_mdiobus_child_is_phy(child))
 			of_mdiobus_register_phy(mdio, child, addr);

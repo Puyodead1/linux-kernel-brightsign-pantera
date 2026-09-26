@@ -16,6 +16,14 @@ config WEXT_SPY
 config WEXT_PRIV
 	bool
 
+config OUT_OF_TREE_WIRELESS
+	bool "Support out of tree wireless modules"
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	help
+	  Enable various kernel bits that might be used by out-of-tree
+	  wireless modules like the bcm4323 one.
+
 config CFG80211
 	tristate "cfg80211 - wireless configuration API"
 	depends on RFKILL || !RFKILL

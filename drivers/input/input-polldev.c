@@ -49,20 +49,12 @@ static int input_open_polled_device(struct input_dev *input)
 	if (dev->open)
 		dev->open(dev);
 
-	/* Only start polling if polling is enabled */
-	if (dev->poll_interval > 0) {
-		dev->poll(dev);
-		input_polldev_queue_work(dev);
-	}
-
 	return 0;
 }
 
 static void input_close_polled_device(struct input_dev *input)
 {
 	struct input_polled_dev *dev = input_get_drvdata(input);
-
-	cancel_delayed_work_sync(&dev->work);
 
 	if (dev->close)
 		dev->close(dev);
@@ -341,6 +333,13 @@ int input_register_polled_device(struct input_polled_dev *dev)
 		devres_add(input->dev.parent, devres);
 	}
 
+	/* Only start polling if polling is enabled */
+	if (dev->poll_interval > 0) {
+		pr_info("Start poll %p\n", dev->poll);
+		dev->poll(dev);
+		input_polldev_queue_work(dev);
+	}
+
 	return 0;
 }
 EXPORT_SYMBOL(input_register_polled_device);
@@ -360,7 +359,7 @@ void input_unregister_polled_device(struct input_polled_dev *dev)
 					devm_input_polldev_unregister,
 					devm_input_polldev_match,
 					dev));
-
+	cancel_delayed_work_sync(&dev->work);
 	input_unregister_device(dev->input);
 }
 EXPORT_SYMBOL(input_unregister_polled_device);

@@ -2610,7 +2610,12 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
 				   __func__, error_type, req->rq_disk ?
 				   req->rq_disk->disk_name : "?",
 				   (unsigned long long)blk_rq_pos(req));
-
+#ifdef CONFIG_BLK_DEV_SYSFS_ERRORS
+		if (req->rq_disk)
+			genhd_report_error(req->rq_disk,
+				GENDISK_ERROR_REPORT_SOURCE_BLOCK,
+				blk_rq_pos(req), error);
+#endif
 	}
 
 	blk_account_io_completion(req, nr_bytes);

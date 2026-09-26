@@ -26,6 +26,7 @@
 
 #define DMA_ERROR_CODE	(~(dma_addr_t)0)
 extern struct dma_map_ops dummy_dma_ops;
+extern struct dma_map_ops swiotlb_dma_ops;
 
 static inline struct dma_map_ops *__generic_dma_ops(struct device *dev)
 {

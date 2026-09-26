@@ -18,6 +18,7 @@
 #include <linux/phy.h>
 #include <linux/phy_fixed.h>
 #include <linux/mii.h>
+#include <linux/clk.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
@@ -41,6 +42,49 @@ static enum dsa_tag_protocol bcm_sf2_sw_get_tag_protocol(struct dsa_switch *ds)
 	return DSA_TAG_PROTO_BRCM;
 }
 
+/* Return the number of active ports, not counting the IMP (CPU) port */
+static unsigned bcm_sf2_num_active_ports(struct dsa_switch *ds)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	unsigned int port, count = 0;
+
+	for (port = 0; port < ARRAY_SIZE(priv->port_sts); port++) {
+		if (dsa_is_cpu_port(ds, port))
+			continue;
+		if (priv->port_sts[port].enabled)
+			count++;
+	}
+
+	return count;
+}
+
+static void bcm_sf2_recalc_clock(struct dsa_switch *ds)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	unsigned long new_rate;
+	unsigned int ports_active;
+	/* Frequenty in Mhz */
+	const unsigned long rate_table[] = {
+		59220000,
+		60820000,
+		62500000,
+		62500000,
+	};
+
+	ports_active = bcm_sf2_num_active_ports(ds);
+	if (ports_active == 0 || !priv->clk_mdiv)
+		return;
+
+	/* If we overflow our table, just use the recommended operational
+	 * frequency
+	 */
+	if (ports_active > ARRAY_SIZE(rate_table))
+		new_rate = 90000000;
+	else
+		new_rate = rate_table[ports_active - 1];
+	clk_set_rate(priv->clk_mdiv, new_rate);
+}
+
 static void bcm_sf2_imp_vlan_setup(struct dsa_switch *ds, int cpu_port)
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
@@ -61,29 +105,9 @@ static void bcm_sf2_imp_vlan_setup(struct dsa_switch *ds, int cpu_port)
 	}
 }
 
-static void bcm_sf2_imp_setup(struct dsa_switch *ds, int port)
+static void bcm_sf2_brcm_hdr_setup(struct bcm_sf2_priv *priv, int port)
 {
-	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	u32 reg, val;
-
-	/* Enable the port memories */
-	reg = core_readl(priv, CORE_MEM_PSM_VDD_CTRL);
-	reg &= ~P_TXQ_PSM_VDD(port);
-	core_writel(priv, reg, CORE_MEM_PSM_VDD_CTRL);
-
-	/* Enable Broadcast, Multicast, Unicast forwarding to IMP port */
-	reg = core_readl(priv, CORE_IMP_CTL);
-	reg |= (RX_BCST_EN | RX_MCST_EN | RX_UCST_EN);
-	reg &= ~(RX_DIS | TX_DIS);
-	core_writel(priv, reg, CORE_IMP_CTL);
-
-	/* Enable forwarding */
-	core_writel(priv, SW_FWDG_EN, CORE_SWMODE);
-
-	/* Enable IMP port in dumb mode */
-	reg = core_readl(priv, CORE_SWITCH_CTRL);
-	reg |= MII_DUMB_FWDG_EN;
-	core_writel(priv, reg, CORE_SWITCH_CTRL);
 
 	/* Resolve which bit controls the Broadcom tag */
 	switch (port) {
@@ -119,11 +143,111 @@ static void bcm_sf2_imp_setup(struct dsa_switch *ds, int port)
 	reg = core_readl(priv, CORE_BRCM_HDR_TX_DIS);
 	reg &= ~(1 << port);
 	core_writel(priv, reg, CORE_BRCM_HDR_TX_DIS);
+}
+
+static void bcm_sf2_port_learn_setup(struct dsa_switch *ds, int port)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	u32 reg;
+
+	/* Enable learning */
+	reg = core_readl(priv, CORE_DIS_LEARN);
+	reg &= ~BIT(port);
+	core_writel(priv, reg, CORE_DIS_LEARN);
+
+	/* Software learning control disabled */
+	reg = core_readl(priv, CORE_SFT_LRN_CTRL);
+	reg &= ~BIT(port);
+	core_writel(priv, reg, CORE_SFT_LRN_CTRL);
+
+	/* Configure IP multicast, allow Unicast ARL misses to be forwarded */
+	reg = core_readl(priv, CORE_NEW_CTRL);
+	reg |= IP_MC | UC_FWD_EN;
+	core_writel(priv, reg, CORE_NEW_CTRL);
+
+	/* Set port in Unicast lookup forward map */
+	reg = core_readl(priv, CORE_ULF_DROP_MAP);
+	reg |= BIT(port);
+	core_writel(priv, reg, CORE_ULF_DROP_MAP);
+
+	/* Do not set port in Multicast lookup forward map, learn */
+	reg = core_readl(priv, CORE_MLF_DROP_MAP);
+	reg &= ~BIT(port);
+	core_writel(priv, reg, CORE_MLF_DROP_MAP);
+
+	/* Do not set port in IP multicast lookup formward map, learn */
+	reg = core_readl(priv, CORE_MLF_IPMC_FWD_MAP);
+	reg &= ~BIT(port);
+	core_writel(priv, reg, CORE_MLF_IPMC_FWD_MAP);
+}
+
+static void bcm_sf2_imp_setup(struct dsa_switch *ds, int port)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	u32 reg, offset;
+	unsigned int i;
+
+	if (priv->type == BCM7445_DEVICE_ID)
+		offset = CORE_STS_OVERRIDE_IMP;
+	else
+		offset = CORE_STS_OVERRIDE_IMP2;
+
+	/* Enable the port memories */
+	reg = core_readl(priv, CORE_MEM_PSM_VDD_CTRL);
+	reg &= ~P_TXQ_PSM_VDD(port);
+	core_writel(priv, reg, CORE_MEM_PSM_VDD_CTRL);
+
+	/* Enable forwarding and managed mode */
+	core_writel(priv, SW_FWDG_EN | SW_FWDG_MODE, CORE_SWMODE);
+
+	/* Configure port for learning */
+	bcm_sf2_port_learn_setup(ds, port);
+
+	/* Disable dumb forwarding mode for IMP port */
+	reg = core_readl(priv, CORE_SWITCH_CTRL);
+	reg &= ~MII_DUMB_FWDG_EN;
+	core_writel(priv, reg, CORE_SWITCH_CTRL);
+
+	/* Enable IGMP and MLD high-level protocol snooping support */
+	reg = HL_PRTC_IGMP_RPTLVE_EN | HL_PRTC_IGMP_RPTVLE_FWD_MODE |
+	      HL_PRTC_IGMP_QRY_EN | HL_PRTC_IGMP_QRY_FWD_MODE |
+	      HL_PRTC_IGMP_UKN_EN | HL_PRTC_IGMP_UKN_FWD_MODE |
+	      HL_PRTC_MLD_RPTDONE_EN | HL_PRTC_MLD_RPTDONE_FWD_MODE |
+	      HL_PRTC_MLD_QRY_EN | HL_PRTC_MLD_QRY_FWD_MODE;
+	core_writel(priv, reg, CORE_HL_PRTC_CTRL);
+
+	/* Configure Traffic Class to QoS mapping, allow each priority to map
+	 * to a different queue number
+	 */
+	reg = core_readl(priv, CORE_PORT_TC2_QOS_MAP_PORT(port));
+	for (i = 0; i < SF2_NUM_EGRESS_QUEUES; i++)
+		reg |= i << (PRT_TO_QID_SHIFT * i);
+	core_writel(priv, reg, CORE_PORT_TC2_QOS_MAP_PORT(port));
+
+	bcm_sf2_brcm_hdr_setup(priv, port);
+
+	/* Set IMP0 port to be managed port, enable BPDU */
+	reg = core_readl(priv, CORE_GMNCFGCFG);
+	reg &= ~(FRM_MGNP_MASK << FRM_MGNP_SHIFT);
+	if (port == core_readl(priv, CORE_IMP0_PRT_ID))
+		reg |= FRM_MNGP_IMP0 << FRM_MGNP_SHIFT;
+	if (port == core_readl(priv, CORE_IMP1_PRT_ID))
+		reg |= FRM_MGNP_IMP_DUAL << FRM_MGNP_SHIFT;
+	reg |= RXBPDU_EN;
+	core_writel(priv, reg, CORE_GMNCFGCFG);
 
 	/* Force link status for IMP port */
-	reg = core_readl(priv, CORE_STS_OVERRIDE_IMP);
+	reg = core_readl(priv, offset);
 	reg |= (MII_SW_OR | LINK_STS);
-	core_writel(priv, reg, CORE_STS_OVERRIDE_IMP);
+	core_writel(priv, reg, offset);
+
+	/* Enable Broadcast, Unicast forwarding to IMP port */
+	reg = core_readl(priv, CORE_IMP_CTL);
+	reg |= (RX_BCST_EN | RX_UCST_EN);
+	reg &= ~(RX_DIS | TX_DIS);
+	core_writel(priv, reg, CORE_IMP_CTL);
+
+	priv->port_sts[port].enabled = true;
 }
 
 static void bcm_sf2_eee_enable_set(struct dsa_switch *ds, int port, bool enable)
@@ -147,7 +271,7 @@ static void bcm_sf2_gphy_enable_set(struct dsa_switch *ds, bool enable)
 	reg = reg_readl(priv, REG_SPHY_CNTRL);
 	if (enable) {
 		reg |= PHY_RESET;
-		reg &= ~(EXT_PWR_DOWN | IDDQ_BIAS | CK25_DIS);
+		reg &= ~(EXT_PWR_DOWN | IDDQ_BIAS | IDDQ_GLOBAL_PWR | CK25_DIS);
 		reg_writel(priv, reg, REG_SPHY_CNTRL);
 		udelay(21);
 		reg = reg_readl(priv, REG_SPHY_CNTRL);
@@ -217,12 +341,40 @@ static int bcm_sf2_port_setup(struct dsa_switch *ds, int port,
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	s8 cpu_port = ds->dst[ds->index].cpu_port;
+	unsigned int i;
 	u32 reg;
+
+	priv->port_sts[port].enabled = true;
+
+	bcm_sf2_recalc_clock(ds);
 
 	/* Clear the memory power down */
 	reg = core_readl(priv, CORE_MEM_PSM_VDD_CTRL);
 	reg &= ~P_TXQ_PSM_VDD(port);
 	core_writel(priv, reg, CORE_MEM_PSM_VDD_CTRL);
+
+	/* Configure port for learning */
+	bcm_sf2_port_learn_setup(ds, port);
+
+	/* Enable Broadcom tags for that port if requested */
+	if (priv->brcm_tag_mask & BIT(port)) {
+		bcm_sf2_brcm_hdr_setup(priv, port);
+
+		/* Disable learning on ASP port */
+		if (port == 7) {
+			reg = core_readl(priv, CORE_DIS_LEARN);
+			reg |= BIT(port);
+			core_writel(priv, reg, CORE_DIS_LEARN);
+		}
+	}
+
+	/* Configure Traffic Class to QoS mapping, allow each priority to map
+	 * to a different queue number
+	 */
+	reg = core_readl(priv, CORE_PORT_TC2_QOS_MAP_PORT(port));
+	for (i = 0; i < SF2_NUM_EGRESS_QUEUES; i++)
+		reg |= i << (PRT_TO_QID_SHIFT * i);
+	core_writel(priv, reg, CORE_PORT_TC2_QOS_MAP_PORT(port));
 
 	/* Clear the Rx and Tx disable bits and set to no spanning tree */
 	core_writel(priv, 0, CORE_G_PCTL_PORT(port));
@@ -265,6 +417,19 @@ static int bcm_sf2_port_setup(struct dsa_switch *ds, int port,
 	if (priv->port_sts[port].eee.eee_enabled)
 		bcm_sf2_eee_enable_set(ds, port, true);
 
+	/* Set per-queue pause threshold to 32 */
+	core_writel(priv, 32, CORE_TXQ_THD_PAUSE_QN_PORT(port));
+
+	/* Set ACB threshold to 24 */
+	for (i = 0; i < SF2_NUM_EGRESS_QUEUES; i++) {
+		reg = acb_readl(priv, ACB_QUEUE_CFG(port *
+						    SF2_NUM_EGRESS_QUEUES + i));
+		reg &= ~XOFF_THRESHOLD_MASK;
+		reg |= 24;
+		acb_writel(priv, reg, ACB_QUEUE_CFG(port *
+						    SF2_NUM_EGRESS_QUEUES + i));
+	}
+
 	return 0;
 }
 
@@ -274,8 +439,13 @@ static void bcm_sf2_port_disable(struct dsa_switch *ds, int port,
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	u32 off, reg;
 
-	if (priv->wol_ports_mask & (1 << port))
+	/* Disable learning while in WoL mode */
+	if (priv->wol_ports_mask & (1 << port)) {
+		reg = core_readl(priv, CORE_DIS_LEARN);
+		reg |= BIT(port);
+		core_writel(priv, reg, CORE_DIS_LEARN);
 		return;
+	}
 
 	if (port == priv->moca_port)
 		bcm_sf2_port_intr_disable(priv, port);
@@ -296,6 +466,10 @@ static void bcm_sf2_port_disable(struct dsa_switch *ds, int port,
 	reg = core_readl(priv, CORE_MEM_PSM_VDD_CTRL);
 	reg |= P_TXQ_PSM_VDD(port);
 	core_writel(priv, reg, CORE_MEM_PSM_VDD_CTRL);
+
+	priv->port_sts[port].enabled = false;
+
+	bcm_sf2_recalc_clock(ds);
 }
 
 /* Returns 0 if EEE was not enabled, or 1 otherwise
@@ -348,6 +522,38 @@ static int bcm_sf2_sw_set_eee(struct dsa_switch *ds, int port,
 		if (!p->eee_enabled)
 			return -EOPNOTSUPP;
 	}
+
+	return 0;
+}
+
+/* Fast-ageing of ARL entries for a given port, equivalent to an ARL
+ * flush for that port. (Removed by Broadcom in v4.9-1.14 or earlier,
+ * resurrected by BrightSign because we need it.)
+ */
+static int bcm_sf2_sw_fast_age_port(struct dsa_switch  *ds, int port)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	unsigned int timeout = 1000;
+	u32 reg;
+
+	core_writel(priv, port, CORE_FAST_AGE_PORT);
+
+	reg = core_readl(priv, CORE_FAST_AGE_CTRL);
+	reg |= EN_AGE_PORT | EN_AGE_DYNAMIC | FAST_AGE_STR_DONE;
+	core_writel(priv, reg, CORE_FAST_AGE_CTRL);
+
+	do {
+		reg = core_readl(priv, CORE_FAST_AGE_CTRL);
+		if (!(reg & FAST_AGE_STR_DONE))
+			break;
+
+		cpu_relax();
+	} while (timeout--);
+
+	if (!timeout)
+		return -ETIMEDOUT;
+
+	core_writel(priv, 0, CORE_FAST_AGE_CTRL);
 
 	return 0;
 }
@@ -503,6 +709,9 @@ static void bcm_sf2_identify_ports(struct bcm_sf2_priv *priv,
 
 		if (mode == PHY_INTERFACE_MODE_MOCA)
 			priv->moca_port = port_num;
+
+		if (of_property_read_bool(port, "brcm,use-bcm-hdr"))
+			priv->brcm_tag_mask |= 1 << port_num;
 	}
 }
 
@@ -545,9 +754,21 @@ static int bcm_sf2_mdio_register(struct dsa_switch *ds)
 	 * driver.
 	 */
 	if (of_machine_is_compatible("brcm,bcm7445d0"))
-		priv->indir_phy_mask |= (1 << BRCM_PSEUDO_PHY_ADDR);
+		priv->indir_phy_mask |= (1 << BRCM_PSEUDO_PHY_ADDR) | (1 << 0);
 	else
 		priv->indir_phy_mask = 0;
+
+	if (priv->type == BCM7445_DEVICE_ID) {
+		/* BrightSign Tiger: Make the activity LED work the way we want. */
+		reg_writel(priv, 0x02035403 | SPDLNK_SRC_SEL, REG_LED_0_CNTRL);
+	}
+
+	/* BrightSign: Don't drop LLDP packets. */
+	{
+		u32 reg = core_readl (priv, CORE_RSV_MCAST_CTRL);
+		reg &= ~(EN_MUL_0 | EN_MUL_1);
+		core_writel(priv, reg, CORE_RSV_MCAST_CTRL);
+	}
 
 	ds->phys_mii_mask = priv->indir_phy_mask;
 	ds->slave_mii_bus = priv->slave_mii_bus;
@@ -591,7 +812,12 @@ static void bcm_sf2_sw_adjust_link(struct dsa_switch *ds, int port,
 	struct ethtool_eee *p = &priv->port_sts[port].eee;
 	u32 id_mode_dis = 0, port_mode;
 	const char *str = NULL;
-	u32 reg;
+	u32 reg, offset;
+
+	if (priv->type == BCM7445_DEVICE_ID)
+		offset = CORE_STS_OVERRIDE_GMIIP_PORT(port);
+	else
+		offset = CORE_STS_OVERRIDE_GMIIP2_PORT(port);
 
 	switch (phydev->interface) {
 	case PHY_INTERFACE_MODE_RGMII:
@@ -662,7 +888,7 @@ force_link:
 	if (phydev->duplex == DUPLEX_FULL)
 		reg |= DUPLX_MODE;
 
-	core_writel(priv, reg, CORE_STS_OVERRIDE_GMIIP_PORT(port));
+	core_writel(priv, reg, offset);
 
 	if (!phydev->is_pseudo_fixed_link)
 		p->eee_enabled = bcm_sf2_eee_init(ds, port, phydev);
@@ -672,8 +898,13 @@ static void bcm_sf2_sw_fixed_link_update(struct dsa_switch *ds, int port,
 					 struct fixed_phy_status *status)
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
-	u32 duplex, pause;
+	u32 duplex, pause, offset;
 	u32 reg;
+
+	if (priv->type == BCM7445_DEVICE_ID)
+		offset = CORE_STS_OVERRIDE_GMIIP_PORT(port);
+	else
+		offset = CORE_STS_OVERRIDE_GMIIP2_PORT(port);
 
 	duplex = core_readl(priv, CORE_DUPSTS);
 	pause = core_readl(priv, CORE_PAUSESTS);
@@ -703,13 +934,13 @@ static void bcm_sf2_sw_fixed_link_update(struct dsa_switch *ds, int port,
 		status->duplex = !!(duplex & (1 << port));
 	}
 
-	reg = core_readl(priv, CORE_STS_OVERRIDE_GMIIP_PORT(port));
+	reg = core_readl(priv, offset);
 	reg |= SW_OVERRIDE;
 	if (status->link)
 		reg |= LINK_STS;
 	else
 		reg &= ~LINK_STS;
-	core_writel(priv, reg, CORE_STS_OVERRIDE_GMIIP_PORT(port));
+	core_writel(priv, reg, offset);
 
 	if ((pause & (1 << port)) &&
 	    (pause & (1 << (port + PAUSESTS_TX_PAUSE_SHIFT)))) {
@@ -721,10 +952,25 @@ static void bcm_sf2_sw_fixed_link_update(struct dsa_switch *ds, int port,
 		status->pause = 1;
 }
 
+static void bcm_sf2_enable_acb(struct dsa_switch *ds)
+{
+	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+	u32 reg;
+
+	/* Enable ACB globally */
+	reg = acb_readl(priv, ACB_CONTROL);
+	reg |= (ACB_FLUSH_MASK << ACB_FLUSH_SHIFT);
+	acb_writel(priv, reg, ACB_CONTROL);
+	reg &= ~(ACB_FLUSH_MASK << ACB_FLUSH_SHIFT);
+	reg |= ACB_EN | ACB_ALGORITHM;
+	acb_writel(priv, reg, ACB_CONTROL);
+}
+
 static int bcm_sf2_sw_suspend(struct dsa_switch *ds)
 {
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	unsigned int port;
+	u32 reg;
 
 	bcm_sf2_intr_disable(priv);
 
@@ -738,6 +984,23 @@ static int bcm_sf2_sw_suspend(struct dsa_switch *ds)
 			bcm_sf2_port_disable(ds, port, NULL);
 	}
 
+	/* Disable management mode since we won't be able to
+	 * perform any tasks while being suspended.
+	 */
+	reg = core_readl(priv, CORE_SWMODE);
+	reg &= ~SW_FWDG_MODE;
+	core_writel(priv, reg, CORE_SWMODE);
+
+	/* Enable IMP port in dumb switching mode to allow
+	 * Magic Packets to reach IMP port.
+	 */
+	reg = core_readl(priv, CORE_SWITCH_CTRL);
+	reg |= MII_DUMB_FWDG_EN;
+	core_writel(priv, reg, CORE_SWITCH_CTRL);
+
+	if (!priv->wol_ports_mask)
+		clk_disable_unprepare(priv->clk);
+
 	return 0;
 }
 
@@ -746,11 +1009,24 @@ static int bcm_sf2_sw_resume(struct dsa_switch *ds)
 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
 	int ret;
 
+	if (!priv->wol_ports_mask)
+		clk_prepare_enable(priv->clk);
+
+	/* Bump up the switch core clock to let the CFP RAMs latch
+	 * data in correctly
+	 */
+	if (priv->clk_mdiv)
+		clk_set_rate(priv->clk_mdiv, 250000000);
+
 	ret = bcm_sf2_sw_rst(priv);
 	if (ret) {
 		pr_err("%s: failed to software reset switch\n", __func__);
 		return ret;
 	}
+
+	ret = bcm_sf2_cfp_resume(ds);
+	if (ret)
+		return ret;
 
 	if (priv->hw_params.num_gphy == 1)
 		bcm_sf2_gphy_enable_set(ds, true);
@@ -844,10 +1120,9 @@ static void bcm_sf2_sw_configure_vlan(struct dsa_switch *ds)
 	bcm_sf2_vlan_op(priv, ARLA_VTBL_CMD_CLEAR);
 
 	for (port = 0; port < priv->hw_params.num_ports; port++) {
-		if (!((1 << port) & ds->enabled_port_mask))
-			continue;
-
-		core_writel(priv, 1, CORE_DEFAULT_1Q_TAG_P(port));
+		if (((1 << port) & ds->enabled_port_mask) ||
+		    dsa_is_cpu_port(ds, port))
+			core_writel(priv, 0, CORE_DEFAULT_1Q_TAG_P(port));
 	}
 }
 
@@ -868,6 +1143,7 @@ static int bcm_sf2_sw_setup(struct dsa_switch *ds)
 	}
 
 	bcm_sf2_sw_configure_vlan(ds);
+	bcm_sf2_enable_acb(ds);
 
 	return 0;
 }
@@ -971,10 +1247,80 @@ static struct b53_io_ops bcm_sf2_io_ops = {
 	.write64 = bcm_sf2_core_write64,
 };
 
+struct bcm_sf2_of_data {
+	u32 type;
+	const u16 *reg_offsets;
+	unsigned int core_reg_align;
+	unsigned int num_cfp_rules;
+};
+
+/* Register offsets for the SWITCH_REG_* block */
+static const u16 bcm_sf2_7445_reg_offsets[] = {
+	[REG_SWITCH_CNTRL]	= 0x00,
+	[REG_SWITCH_STATUS]	= 0x04,
+	[REG_DIR_DATA_WRITE]	= 0x08,
+	[REG_DIR_DATA_READ]	= 0x0C,
+	[REG_SWITCH_REVISION]	= 0x18,
+	[REG_PHY_REVISION]	= 0x1C,
+	[REG_SPHY_CNTRL]	= 0x2C,
+	[REG_RGMII_0_CNTRL]	= 0x34,
+	[REG_RGMII_1_CNTRL]	= 0x40,
+	[REG_RGMII_2_CNTRL]	= 0x4c,
+	[REG_LED_0_CNTRL]	= 0x90,
+	[REG_LED_1_CNTRL]	= 0x94,
+	[REG_LED_2_CNTRL]	= 0x98,
+};
+
+static const struct bcm_sf2_of_data bcm_sf2_7445_data = {
+	.type		= BCM7445_DEVICE_ID,
+	.core_reg_align	= 0,
+	.reg_offsets	= bcm_sf2_7445_reg_offsets,
+	.num_cfp_rules	= 256,
+};
+
+static const u16 bcm_sf2_7278_reg_offsets[] = {
+	[REG_SWITCH_CNTRL]	= 0x00,
+	[REG_SWITCH_STATUS]	= 0x04,
+	[REG_DIR_DATA_WRITE]	= 0x08,
+	[REG_DIR_DATA_READ]	= 0x0c,
+	[REG_SWITCH_REVISION]	= 0x10,
+	[REG_PHY_REVISION]	= 0x14,
+	[REG_SPHY_CNTRL]	= 0x24,
+	[REG_RGMII_0_CNTRL]	= 0xe0,
+	[REG_RGMII_1_CNTRL]	= 0xec,
+	[REG_RGMII_2_CNTRL]	= 0xf8,
+	[REG_LED_0_CNTRL]	= 0x40,
+	[REG_LED_1_CNTRL]	= 0x4c,
+	[REG_LED_2_CNTRL]	= 0x58,
+};
+
+static const struct bcm_sf2_of_data bcm_sf2_7278_data = {
+	.type		= BCM7278_DEVICE_ID,
+	.core_reg_align	= 1,
+	.reg_offsets	= bcm_sf2_7278_reg_offsets,
+	.num_cfp_rules	= 128,
+};
+
+static const struct of_device_id bcm_sf2_of_match[] = {
+	{ .compatible = "brcm,bcm7445-switch-v4.0",
+	  .data = &bcm_sf2_7445_data
+	},
+	{ .compatible = "brcm,bcm7278-switch-v4.0",
+	  .data = &bcm_sf2_7278_data
+	},
+	{ .compatible = "brcm,bcm7278-switch-v4.8",
+	  .data = &bcm_sf2_7278_data
+	},
+	{ /* sentinel */ },
+};
+MODULE_DEVICE_TABLE(of, bcm_sf2_of_match);
+
 static int bcm_sf2_sw_probe(struct platform_device *pdev)
 {
 	const char *reg_names[BCM_SF2_REGS_NUM] = BCM_SF2_REGS_NAME;
 	struct device_node *dn = pdev->dev.of_node;
+	const struct of_device_id *of_id = NULL;
+	const struct bcm_sf2_of_data *data;
 	struct b53_platform_data *pdata;
 	struct dsa_switch_ops *ops;
 	struct bcm_sf2_priv *priv;
@@ -990,6 +1336,14 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
+	priv->clk = of_clk_get_by_name(dn, "sw_switch");
+	if (IS_ERR(priv->clk)) {
+		if (PTR_ERR(priv->clk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		pr_warn("%s: failed to request clock\n", __func__);
+		priv->clk = NULL;
+	}
+
 	ops = devm_kzalloc(&pdev->dev, sizeof(*ops), GFP_KERNEL);
 	if (!ops)
 		return -ENOMEM;
@@ -1002,11 +1356,23 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -ENOMEM;
 
+	of_id = of_match_node(bcm_sf2_of_match, dn);
+	if (!of_id || !of_id->data)
+		return -EINVAL;
+
+	data = of_id->data;
+
+	/* Set SWITCH_REG register offsets and SWITCH_CORE align factor */
+	priv->type = data->type;
+	priv->reg_offsets = data->reg_offsets;
+	priv->core_reg_align = data->core_reg_align;
+	priv->num_cfp_rules = data->num_cfp_rules;
+
 	/* Auto-detection using standard registers will not work, so
 	 * provide an indication of what kind of device we are for
 	 * b53_common to work with
 	 */
-	pdata->chip_id = BCM7445_DEVICE_ID;
+	pdata->chip_id = priv->type;
 	dev->pdata = pdata;
 
 	priv->dev = dev;
@@ -1028,16 +1394,29 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 	ds->ops->port_disable = bcm_sf2_port_disable;
 	ds->ops->get_eee = bcm_sf2_sw_get_eee;
 	ds->ops->set_eee = bcm_sf2_sw_set_eee;
+	ds->ops->get_rxnfc = bcm_sf2_get_rxnfc;
+	ds->ops->set_rxnfc = bcm_sf2_set_rxnfc;
 
 	/* Avoid having DSA free our slave MDIO bus (checking for
 	 * ds->slave_mii_bus and ds->ops->phy_read being non-NULL)
 	 */
 	ds->ops->phy_read = NULL;
 
+	/* Advertise the 8 egress queues */
+	ds->num_tx_queues = SF2_NUM_EGRESS_QUEUES;
+
 	dev_set_drvdata(&pdev->dev, priv);
 
 	spin_lock_init(&priv->indir_lock);
 	mutex_init(&priv->stats_mutex);
+	mutex_init(&priv->cfp.lock);
+	INIT_LIST_HEAD(&priv->cfp.rules_list);
+
+	/* CFP rule #0 cannot be used for specific classifications, flag it as
+	 * permanently used
+	 */
+	set_bit(0, priv->cfp.used);
+	set_bit(0, priv->cfp.unique);
 
 	bcm_sf2_identify_ports(priv, dn->child);
 
@@ -1055,16 +1434,35 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 		base++;
 	}
 
+	clk_prepare_enable(priv->clk);
+
+	priv->clk_mdiv = of_clk_get_by_name(dn, "sw_switch_mdiv");
+	if (IS_ERR(priv->clk_mdiv)) {
+		pr_warn("%s: failed to request divider clock\n", __func__);
+		priv->clk_mdiv = NULL;
+	}
+	clk_prepare_enable(priv->clk_mdiv);
+
 	ret = bcm_sf2_sw_rst(priv);
 	if (ret) {
 		pr_err("unable to software reset switch: %d\n", ret);
-		return ret;
+		goto out_clk;
 	}
+
+	bcm_sf2_gphy_enable_set(priv->dev->ds, true);
 
 	ret = bcm_sf2_mdio_register(ds);
 	if (ret) {
 		pr_err("failed to register MDIO bus\n");
-		return ret;
+		goto out_clk;
+	}
+
+	bcm_sf2_gphy_enable_set(priv->dev->ds, false);
+
+	ret = bcm_sf2_cfp_rst(priv);
+	if (ret) {
+		pr_err("failed to reset CFP\n");
+		goto out_mdio;
 	}
 
 	/* Disable all interrupts and request them */
@@ -1101,6 +1499,27 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 				 &priv->hw_params.num_gphy))
 		priv->hw_params.num_gphy = 1;
 
+	/* BrightSign: use flooding instead of switch forwarding.  BS#32468
+	 * We have had problems with traffic disruption using the built-in
+	 * switch, which are avoided if we keep the forwarding database
+	 * empty and rely on flooding of unknown packets.  Do this before
+	 * the database is populated.  Disable learning on all ports.
+	 */
+	{
+		unsigned char port_mask = 0;
+		unsigned int port;
+		for (port = 0; port < priv->hw_params.num_ports; port++)
+			port_mask |= (1 << port);
+
+		core_writel(priv, port_mask, CORE_DIS_LEARN);
+
+		/* Clear out any old entries */
+		for (port = 0; port < priv->hw_params.num_ports; port++)
+			bcm_sf2_sw_fast_age_port(ds, port);
+
+		pr_warn("sf2: flooding mode\n");
+	}
+
 	rev = reg_readl(priv, REG_SWITCH_REVISION);
 	priv->hw_params.top_rev = (rev >> SWITCH_TOP_REV_SHIFT) &
 					SWITCH_TOP_REV_MASK;
@@ -1113,15 +1532,19 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 	if (ret)
 		goto out_mdio;
 
-	pr_info("Starfighter 2 top: %x.%02x, core: %x.%02x base: 0x%p, IRQs: %d, %d\n",
-		priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
-		priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
-		priv->core, priv->irq0, priv->irq1);
+	dev_info(&pdev->dev,
+		 "Starfighter 2 top: %x.%02x, core: %x.%02x, IRQs: %d, %d\n",
+		 priv->hw_params.top_rev >> 8, priv->hw_params.top_rev & 0xff,
+		 priv->hw_params.core_rev >> 8, priv->hw_params.core_rev & 0xff,
+		 priv->irq0, priv->irq1);
 
 	return 0;
 
 out_mdio:
 	bcm_sf2_mdio_unregister(priv);
+out_clk:
+	clk_disable_unprepare(priv->clk_mdiv);
+	clk_disable_unprepare(priv->clk);
 	return ret;
 }
 
@@ -1131,6 +1554,7 @@ static int bcm_sf2_sw_remove(struct platform_device *pdev)
 
 	priv->wol_ports_mask = 0;
 	dsa_unregister_switch(priv->dev->ds);
+	bcm_sf2_cfp_exit(priv->dev->ds);
 	/* Disable all ports and interrupts */
 	bcm_sf2_sw_suspend(priv->dev->ds);
 	bcm_sf2_mdio_unregister(priv);
@@ -1173,11 +1597,6 @@ static int bcm_sf2_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(bcm_sf2_pm_ops,
 			 bcm_sf2_suspend, bcm_sf2_resume);
 
-static const struct of_device_id bcm_sf2_of_match[] = {
-	{ .compatible = "brcm,bcm7445-switch-v4.0" },
-	{ /* sentinel */ },
-};
-MODULE_DEVICE_TABLE(of, bcm_sf2_of_match);
 
 static struct platform_driver bcm_sf2_driver = {
 	.probe	= bcm_sf2_sw_probe,

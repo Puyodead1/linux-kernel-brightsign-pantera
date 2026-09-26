@@ -682,6 +682,12 @@ int snd_usb_parse_audio_interface(struct snd_usb_audio *chip, int iface_no)
 		/* some quirks for attributes here */
 
 		switch (chip->usb_id) {
+		case USB_ID(0x05a7, 0x40fa): /* Bose Revolve */
+			/* MaxPacketsOnly is set, but 44.1kHz audio doesn't work as a result */
+			fp->attributes &= ~UAC_EP_CS_ATTR_FILL_MAX;
+			break;
+		case USB_ID(0x05a7, 0x1020): /* Bose companion 5 */
+			/* Only has one sample rate, and setting it makes a buzzing sound on bootup */
 		case USB_ID(0x0a92, 0x0053): /* AudioTrak Optoplay */
 			/* Optoplay sets the sample rate attribute although
 			 * it seems not supporting it in fact.

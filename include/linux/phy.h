@@ -404,6 +404,11 @@ struct phy_device {
 
 	int link_timeout;
 
+#ifdef CONFIG_LED_TRIGGER_PHY
+	struct phy_led_trigger *last_triggered;
+	struct phy_led_trigger *led_link_trigger;
+#endif
+
 	/*
 	 * Interrupt number for this PHY
 	 * -1 means no interrupt

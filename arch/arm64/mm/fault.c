@@ -49,7 +49,7 @@ struct fault_info {
 	const char *name;
 };
 
-static const struct fault_info fault_info[];
+static struct fault_info fault_info[];
 
 static inline const struct fault_info *esr_to_fault_info(unsigned int esr)
 {
@@ -501,7 +501,7 @@ static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 	return 1;
 }
 
-static const struct fault_info fault_info[] = {
+static struct fault_info fault_info[] = {
 	{ do_bad,		SIGBUS,  0,		"ttbr address size fault"	},
 	{ do_bad,		SIGBUS,  0,		"level 1 address size fault"	},
 	{ do_bad,		SIGBUS,  0,		"level 2 address size fault"	},
@@ -567,6 +567,19 @@ static const struct fault_info fault_info[] = {
 	{ do_bad,		SIGBUS,  0,		"page domain fault"		},
 	{ do_bad,		SIGBUS,  0,		"unknown 63"			},
 };
+
+void __init hook_fault_code(int nr,
+			    int (*fn)(unsigned long, unsigned int, struct pt_regs *),
+			    int sig, int code, const char *name)
+{
+	BUG_ON(nr < 0 || nr >= ARRAY_SIZE(fault_info));
+
+	fault_info[nr].fn	= fn;
+	fault_info[nr].sig	= sig;
+	fault_info[nr].code	= code;
+	fault_info[nr].name	= name;
+}
+
 
 /*
  * Dispatch a data abort to the relevant handler.

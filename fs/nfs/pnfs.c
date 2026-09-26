@@ -2457,7 +2457,6 @@ pnfs_layoutcommit_inode(struct inode *inode, bool sync)
 			goto out;
 		status = wait_on_bit_lock_action(&nfsi->flags,
 				NFS_INO_LAYOUTCOMMITTING,
-				nfs_wait_bit_killable,
 				TASK_KILLABLE);
 		if (status)
 			goto out;

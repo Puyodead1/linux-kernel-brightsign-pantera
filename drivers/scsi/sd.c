@@ -51,6 +51,7 @@
 #include <linux/async.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
+#include <linux/leds.h>
 #include <linux/pr.h>
 #include <linux/t10-pi.h>
 #include <asm/uaccess.h>
@@ -922,6 +923,10 @@ static int sd_setup_read_write_cmnd(struct scsi_cmnd *SCpnt)
 		goto out;
 	SCpnt = rq->special;
 	sdkp = scsi_disk(disk);
+
+#ifdef CONFIG_LEDS_TRIGGER_DISK
+	ledtrig_disk_activity();
+#endif
 
 	/* from here on until we're complete, any goto out
 	 * is used for a killable error condition */

@@ -118,6 +118,9 @@ struct in_addr {
 #define IP_CHECKSUM	23
 #define IP_BIND_ADDRESS_NO_PORT	24
 
+#define IP_NFBRIDGEINFO 85
+#define IP_RECVNFBRIDGEINFO	IP_NFBRIDGEINFO
+
 /* IP_MTU_DISCOVER values */
 #define IP_PMTUDISC_DONT		0	/* Never send DF frames */
 #define IP_PMTUDISC_WANT		1	/* Use per route hints	*/
@@ -223,6 +226,10 @@ struct in_pktinfo {
 	struct in_addr	ipi_addr;
 };
 #endif
+
+struct in_nfbridgeinfo {
+	int		inbi_physindev;
+};
 
 /* Structure describing an Internet (IP) socket address. */
 #if  __UAPI_DEF_SOCKADDR_IN

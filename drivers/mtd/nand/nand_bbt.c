@@ -76,6 +76,17 @@
 #define BBT_ENTRY_MASK		0x03
 #define BBT_ENTRY_SHIFT		2
 
+static unsigned int rebuild_bbt = 0;
+
+static int __init boot_rebuild_bbt(char* str)
+{
+	if (kstrtouint(str, 0, &rebuild_bbt) != 0)
+		pr_err("Invalid rebuild_bbt parameter\n");
+	return 1;
+}
+
+__setup("rebuild_bbt=", boot_rebuild_bbt);
+
 static int nand_update_bbt(struct mtd_info *mtd, loff_t offs);
 
 static inline uint8_t bbt_get_entry(struct nand_chip *chip, int block)
@@ -963,6 +974,13 @@ static int check_create(struct mtd_info *mtd, uint8_t *buf, struct nand_bbt_desc
 			} else {
 				rd = td;
 			}
+		}
+
+		if (rebuild_bbt) {
+			pr_err("Forcing rebuild of BBT\n");
+			create = 1;
+			rd = rd2 = NULL;
+			writeops = 0x03;
 		}
 
 		if (create) {
